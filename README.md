@@ -19,6 +19,39 @@ Fleet Health Autopilot provides:
 - Structured email-ready summaries
 - Actionable fleet insights in seconds
 
+## Key Features
+
+### 🤖 AI Chat Assistant
+Embedded AI chatbot allows users to:
+- Ask natural language questions about fleet health
+- Investigate device issues conversationally
+- Get contextual explanations of faults and anomalies
+
+### 📬 Automated Email Notifications
+- Structured health summaries
+- Exception-based alerts
+- Ready-to-send fleet status reports
+
+### 🔐 Group & Security Aware
+- Respects Geotab group structures
+- Maintains security clearance boundaries
+- Works across multi-database environments
+
+### 🔥 Exception HotSpot
+- Automatically clusters recurring issues
+- Highlights high-risk vehicles
+- Surfaces hidden operational blind spots
+
+### ⚙ n8n Automated Workflows
+- Triggers external automations
+- Enables recurring health scans
+- Connects fleet health data into broader operational pipelines
+
+### 🔗 Native Geotab Integration
+- Deep SDK integration
+- Direct record links inside the add-in
+- Seamless navigation back to Geotab entities
+
 ## How It Works
 
 The add-in runs inside MyGeotab and:
