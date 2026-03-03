@@ -1,89 +1,70 @@
-# Fleet Health Autopilot
+Fleet Health Autopilot
 
-Fleet Health Autopilot is a lightweight Geotab add-in that automatically scans fleet databases and surfaces device health issues including:
+Fleet Health Autopilot is an AI-powered Geotab add-in that proactively monitors device health across fleet databases.
 
-- Not installed devices
-- Low asset battery faults
-- General device health conditions
-- Fleet-level status overview
+Problem
 
-## Problem
+Fleet managers rely on telematics devices for compliance and visibility, but health issues like uninstalled units or low asset batteries often remain hidden. Manual checks are reactive and time-consuming.
 
-Fleet managers often lack visibility into hidden device health issues across multiple databases. Manual checks are time-consuming and reactive.
+Solution
 
-## Solution
+Fleet Health Autopilot introduces a proactive, AI-assisted health intelligence layer inside Geotab that:
 
-Fleet Health Autopilot provides:
-- Automated scanning
-- Clean visual reporting
-- Structured email-ready summaries
-- Actionable fleet insights in seconds
+Scans live fleet data
 
-## Key Features
+Detects anomalies and exception HotSpots
 
-### 🤖 AI Chat Assistant
-Embedded AI chatbot allows users to:
-- Ask natural language questions about fleet health
-- Investigate device issues conversationally
-- Get contextual explanations of faults and anomalies
+Respects group security structures
 
-### 📬 Automated Email Notifications
-- Structured health summaries
-- Exception-based alerts
-- Ready-to-send fleet status reports
+Generates structured email alerts
 
-### 🔐 Group & Security Aware
-- Respects Geotab group structures
-- Maintains security clearance boundaries
-- Works across multi-database environments
+Triggers n8n automated workflows
 
-### 🔥 Exception HotSpot
-- Automatically clusters recurring issues
-- Highlights high-risk vehicles
-- Surfaces hidden operational blind spots
+Deep-links directly to Geotab records
 
-### ⚙ n8n Automated Workflows
-- Triggers external automations
-- Enables recurring health scans
-- Connects fleet health data into broader operational pipelines
+Key Features
 
-### 🔗 Native Geotab Integration
-- Deep SDK integration
-- Direct record links inside the add-in
-- Seamless navigation back to Geotab entities
+AI Chat Assistant
+Live-query conversational interface for fleet health diagnostics.
 
-## How It Works
+Exception HotSpot Engine
+Clusters recurring issues and highlights operational risk areas.
 
-The add-in runs inside MyGeotab and:
-1. Queries device and vehicle data
-2. Identifies health anomalies
-3. Displays structured health summaries
-4. Generates email-ready reports
+Automated Email Notifications
+Structured summaries and exception-based alerts.
 
-## Tech
+Security-Aware Architecture
+Respects Geotab group structures and user clearance levels.
 
-- HTML
-- Vanilla JavaScript
-- Geotab SDK API
-- Config-driven add-in architecture
+n8n Workflow Automation
+Triggers external workflows and recurring scans.
 
-## Architecture Overview
+Native Geotab SDK Integration
+Embedded directly inside MyGeotab with record-level deep linking.
 
-- Frontend: HTML + Vanilla JavaScript
-- Platform: Geotab Add-In SDK
-- AI Layer: Embedded conversational assistant
-- Automation Layer: n8n webhook-triggered workflows
-- Reporting Layer: Structured email generator
-- Security Model: Group-aware, clearance-respecting queries
+Tech Stack
 
-## Prompts Used
+HTML
 
-Development leveraged AI-assisted "vibe coding" workflows to:
-- Architect device health detection logic
-- Refactor UI animation and layout
-- Structure structured health categorisation
-- Improve reporting clarity
+Vanilla JavaScript
 
----
+Geotab Add-In SDK
+
+n8n Webhook Automation
+
+Development Approach
+
+Built using AI-assisted “vibe coding” — rapid iterative development combining:
+
+SDK integration
+
+Live-query logic
+
+Exception modelling
+
+Automation orchestration
+
+UI refinement
 
 Built by Owen Hurst
+Submission for Geotab Hackathon 2026
