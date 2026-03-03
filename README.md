@@ -67,6 +67,15 @@ The add-in runs inside MyGeotab and:
 - Geotab SDK API
 - Config-driven add-in architecture
 
+## Architecture Overview
+
+- Frontend: HTML + Vanilla JavaScript
+- Platform: Geotab Add-In SDK
+- AI Layer: Embedded conversational assistant
+- Automation Layer: n8n webhook-triggered workflows
+- Reporting Layer: Structured email generator
+- Security Model: Group-aware, clearance-respecting queries
+
 ## Prompts Used
 
 Development leveraged AI-assisted "vibe coding" workflows to:
