@@ -1,0 +1,13 @@
+{
+  "name": "Fleet Health Autopilot",
+  "supportEmail": "owen@beyondclarity.com.au",
+  "version": "1.0.0",
+  "items": [{
+    "url": "index.html",
+    "path": "ActivityLink/",
+    "menuName": {
+      "en": "Fleet Health Autopilot"
+    },
+    "icon": "icon.svg"
+  }]
+}

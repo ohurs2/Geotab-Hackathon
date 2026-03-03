@@ -1,0 +1,3100 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Fleet Health Autopilot</title>
+<style>
+#fha-root, #fha-root * { box-sizing: border-box !important; margin: 0 !important; padding: 0 !important; }
+#fha-root { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif !important; color: #0f172a !important; background: #f8fafc !important; }
+
+/* ── Animations ── */
+@keyframes fha-spin { to { transform: rotate(360deg); } }
+@keyframes fha-fadeUp { from { opacity: 0; transform: translateY(16px); } to { opacity: 1; transform: translateY(0); } }
+@keyframes fha-fadeIn { from { opacity: 0; } to { opacity: 1; } }
+@keyframes fha-slideDown { from { opacity: 0; transform: translateY(-8px); } to { opacity: 1; transform: translateY(0); } }
+@keyframes fha-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+@keyframes fha-progressGlow { 0% { box-shadow: 0 0 4px rgba(0,120,211,0.3); } 50% { box-shadow: 0 0 12px rgba(0,120,211,0.5); } 100% { box-shadow: 0 0 4px rgba(0,120,211,0.3); } }
+@keyframes fha-shimmer { 0% { background-position: -200% 0; } 100% { background-position: 200% 0; } }
+@keyframes fha-countUp { from { opacity: 0; transform: scale(0.5); } to { opacity: 1; transform: scale(1); } }
+@keyframes fha-dots { 0%, 20% { content: '.'; } 40% { content: '..'; } 60%, 100% { content: '...'; } }
+.fha-typing::after { content: ''; animation: fha-dots 1.4s infinite steps(1); }
+
+/* ── Animated card entrance ── */
+.fha-card-anim { animation: fha-fadeUp 0.4s ease-out both; }
+.fha-card-anim:nth-child(1) { animation-delay: 0.05s; }
+.fha-card-anim:nth-child(2) { animation-delay: 0.1s; }
+.fha-card-anim:nth-child(3) { animation-delay: 0.15s; }
+.fha-card-anim:nth-child(4) { animation-delay: 0.2s; }
+.fha-card-anim:nth-child(5) { animation-delay: 0.25s; }
+.fha-card-anim:nth-child(6) { animation-delay: 0.3s; }
+.fha-card-anim:nth-child(7) { animation-delay: 0.35s; }
+.fha-card-anim:nth-child(8) { animation-delay: 0.4s; }
+
+/* ── Loading progress bar ── */
+.fha-progress-track { width: 100%; height: 4px; background: #e2e8f0; border-radius: 2px; overflow: hidden; }
+.fha-progress-bar { height: 100%; border-radius: 2px; background: #0078D3; background-size: 200% 100%; animation: fha-shimmer 1.5s linear infinite, fha-progressGlow 2s ease-in-out infinite; transition: width 0.6s ease-out; }
+
+/* ── Gauge SVG animation ── */
+.fha-gauge-arc { transition: stroke-dashoffset 1s cubic-bezier(0.4, 0, 0.2, 1); }
+</style>
+</head>
+<body style="margin:0;padding:0;">
+
+<div id="fha-root">
+  <div id="fha-app"></div>
+</div>
+<div id="fha-map-view" style="display:none;"></div>
+
+<script>
+/* Shim for hosted/standalone mode (outside MyGeotab iframe) */
+if (typeof geotab === "undefined") {
+  var geotab = { addin: {} };
+  window.addEventListener("load", function () {
+    var addinFn = geotab.addin["fleet-health-autopilot"];
+    if (addinFn) {
+      var instance = addinFn();
+      var mockState = {
+        getGroupFilter: function () {
+          return [{ id: "GroupCompanyId" }];
+        }
+      };
+      var mockApi = {
+        getSession: function (cb) {
+          cb({ database: "demo_beyondclarity", userName: "owen@beyondclarity.com.au", sessionId: "mock-session-id", server: "my.geotab.com" });
+        },
+        call: function (method, params, success, error) {
+          if (method === "Get" && params.typeName === "User") {
+            success([
+              { name: "owen@beyondclarity.com.au", firstName: "Owen", lastName: "Clinton" },
+              { name: "demo@geotab.com", firstName: "Demo", lastName: "User" },
+              { name: "fleet.manager@woolworths.com.au", firstName: "Sarah", lastName: "Mitchell" },
+              { name: "ops@penske.com.au", firstName: "James", lastName: "Thornton" }
+            ]);
+          } else if (method === "Get" && params.typeName === "Group") {
+            success([
+              { id: "GroupCompanyId", name: "Company", parent: { id: "GroupRootId" } },
+              { id: "b1234", name: "Sydney Metro", parent: { id: "GroupCompanyId" } },
+              { id: "b1235", name: "Brisbane North", parent: { id: "GroupCompanyId" } },
+              { id: "b1236", name: "Melbourne CBD", parent: { id: "GroupCompanyId" } },
+              { id: "b1237", name: "HomeRun Delivery", parent: { id: "GroupCompanyId" } },
+              { id: "b1238", name: "Long Haul", parent: { id: "GroupCompanyId" } }
+            ]);
+          } else if (method === "Get" && params.typeName === "Rule") {
+            success([
+              { id: "rule-speed", name: "Speeding" },
+              { id: "rule-brake", name: "Harsh Braking" },
+              { id: "rule-corner", name: "Harsh Cornering" },
+              { id: "rule-seatbelt", name: "Seatbelt" },
+              { id: "rule-idle", name: "Excessive Idling" },
+              { id: "rule-afterhours", name: "After Hours Usage" }
+            ]);
+          } else if (method === "Get" && params.typeName === "ExceptionEvent") {
+            var mockEvts = [], base = new Date().getTime() - 86400000;
+            for (var me = 0; me < 40; me++) {
+              mockEvts.push({ id: "ee" + me, device: { id: "d" + (me % 5) }, activeFrom: new Date(base + me * 1800000).toISOString(), activeTo: new Date(base + me * 1800000 + 60000).toISOString(), rule: params.search.ruleSearch });
+            }
+            success(mockEvts);
+          } else if (method === "Get" && params.typeName === "LogRecord") {
+            var mockLogs = [], lb = new Date().getTime() - 86400000;
+            for (var ml = 0; ml < 60; ml++) {
+              mockLogs.push({ dateTime: new Date(lb + ml * 900000).toISOString(), latitude: -27.47 + (Math.random() - 0.5) * 0.15, longitude: 153.02 + (Math.random() - 0.5) * 0.2, speed: Math.random() * 80 });
+            }
+            success(mockLogs);
+          } else { success([]); }
+        }
+      };
+      instance.initialize(mockApi, mockState, function () {});
+    }
+  });
+}
+geotab.addin["fleet-health-autopilot"] = function () {
+  "use strict";
+
+  /* ── Design Tokens v6 — Geotab Zenith ── */
+  var C = {
+    blue: "#0078D3",
+    blueHover: "#005FA8",
+    blueDark: "#004A82",
+    blueLight: "#E5F1FB",
+    blueGlow: "#E5F1FB",
+    textPrimary: "#1F2833",
+    textSecondary: "#556575",
+    textMuted: "#748FAA",
+    textWhite: "#ffffff",
+    bgMain: "#ffffff",
+    bgPage: "#F2F5F7",
+    bgSecondary: "#F2F5F7",
+    bgElevated: "#ffffff",
+    border: "#C0CCD8",
+    borderLight: "#DDE6EC",
+    borderSubtle: "#EEF2F5",
+    danger: "#D32F2F",
+    dangerDark: "#B71C1C",
+    dangerBg: "#FFF5F5",
+    dangerBorder: "#F5C6CB",
+    dangerGlow: "#FFF5F5",
+    success: "#2E7D32",
+    successDark: "#1B5E20",
+    successBg: "#F1F8F1",
+    successBorder: "#C8E6C9",
+    successGlow: "#F1F8F1",
+    warn: "#F57C00",
+    warnDark: "#E65100",
+    warnBg: "#FFF8E1",
+    warnBorder: "#FFE0B2",
+    warnGlow: "#FFF8E1",
+    radius: "4px",
+    radiusSm: "4px",
+    radiusMd: "4px",
+    radiusLg: "8px",
+    radiusFull: "9999px",
+    shadow: "none",
+    shadowMd: "0 2px 4px rgba(0,0,0,0.08)",
+    shadowLg: "0 4px 12px rgba(0,0,0,0.12)"
+  };
+
+  var elApp = document.getElementById("fha-app");
+  var storedApi = null;
+  var currentDb = "";
+  var activeDeviceIds = null; /* Populated from Geotab API — only non-archived devices */
+  var currentUserEmail = "";
+  var currentUserName = "";
+  var currentFirstName = "";
+  var geotabUsers = [];
+  var geotabGroups = [];
+  var activeGroupFilter = [];
+  var groupFilterWasRead = false;
+  var activeGroupNames = [];
+  var sessionCredentials = null;
+  var webhookBase = "https://beyondc.duckdns.org/n8n/webhook/fleet-health-scan";
+  var askWebhookBase = "https://beyondc.duckdns.org/n8n/webhook/fleet-health-ask";
+  var isLoading = false;
+  var lastData = null;
+  var scanHistory = [];
+  var currentView = "dashboard";
+  var chatMessages = [];
+  var isChatOpen = false;
+  var isChatLoading = false;
+  var showSettingsFlag = false;
+  var mapViewActive = false;
+  var mapLeafletLoaded = false;
+  var mapInstance = null;
+  var heatLayerInstance = null;
+  var mapMarkersLayer = null;
+  var cachedRules = null;
+  var cachedDeviceNames = {};
+  var mapDateRange = "yesterday";
+  var mapEnrichedPoints = [];
+  var mapActiveRules = [];
+  var mapRuleLayers = {};
+  var mapRuleColors = ["#D32F2F","#1565C0","#F57F17","#2E7D32","#6A1B9A","#E65100","#00838F","#AD1457"];
+  var mapVehicleFilter = null;
+  var mapRawEventCount = 0;
+  var mapTruncated = false;
+  var elMap = document.getElementById("fha-map-view");
+  var greetingIndex = 0;
+  var greetings = [
+    "Ready to check your fleet?",
+    "Let\u2019s see how your vehicles are doing",
+    "Time for a health check",
+    "Your fleet awaits",
+    "What\u2019s happening across the fleet?",
+    "Let\u2019s keep your fleet in top shape"
+  ];
+
+  var emailConfig = {
+    recipient: "",
+    additionalRecipients: [],
+    autoEmail: true,
+    scheduleHour: 6,
+    scheduleMin: 0,
+    reportGroupId: "",
+    reportGroupName: "",
+    webhookUrl: ""
+  };
+
+  try {
+    var saved = localStorage.getItem("fha-email-config");
+    if (saved) {
+      var p = JSON.parse(saved);
+      if (p.recipient) emailConfig.recipient = p.recipient;
+      if (p.additionalRecipients) emailConfig.additionalRecipients = p.additionalRecipients;
+      if (typeof p.autoEmail !== "undefined") emailConfig.autoEmail = p.autoEmail;
+      if (typeof p.scheduleHour !== "undefined") emailConfig.scheduleHour = p.scheduleHour;
+      if (typeof p.scheduleMin !== "undefined") emailConfig.scheduleMin = p.scheduleMin;
+      if (p.reportGroupId) emailConfig.reportGroupId = p.reportGroupId;
+      if (p.reportGroupName) emailConfig.reportGroupName = p.reportGroupName;
+      if (p.webhookUrl) emailConfig.webhookUrl = p.webhookUrl;
+    }
+  } catch (e) {}
+  if (emailConfig.webhookUrl) webhookBase = emailConfig.webhookUrl;
+
+  function saveConfig() {
+    try { localStorage.setItem("fha-email-config", JSON.stringify(emailConfig)); } catch (e) {}
+  }
+
+  function esc(str) {
+    var d = document.createElement("div");
+    d.appendChild(document.createTextNode(str || ""));
+    return d.innerHTML;
+  }
+
+  function gtBase() { return "https://my.geotab.com/" + currentDb; }
+  function gtExcLink(did, ruleIds) {
+    /* When Risk Map is active, use exact queried date range + rule filters */
+    if (mapViewActive) {
+      var range = getMapDateRange();
+      var url = gtBase() + "/#exceptions2,assetsFilter:!(" + did + "),dateRange:(from:'" + range.from + "',to:'" + range.to + "'),entityType:Device,selectedEntities:!(" + did + ")";
+      if (ruleIds && ruleIds.length > 0) {
+        url += ",ruleIds:!(" + ruleIds.join(",") + ")";
+      } else if (mapActiveRules && mapActiveRules.length > 0) {
+        var ids = [];
+        for (var i = 0; i < mapActiveRules.length; i++) { ids.push(mapActiveRules[i].id); }
+        url += ",ruleIds:!(" + ids.join(",") + ")";
+      }
+      return url;
+    }
+    /* Scanner context — use Yesterday default */
+    return gtBase() + "/#exceptions2,assetsFilter:!(" + did + "),dateRange:(interval:Yesterday),entityType:Device,selectedEntities:!(" + did + ")";
+  }
+  function gtTripsLink(did) { return gtBase() + "/#tripsHistory,dateRange:(interval:Yesterday),entityType:Device,selectedEntities:!(" + did + ")"; }
+  function gtMapLink(did) { return gtBase() + "/#map,liveVehicleIds:!(" + did + ")"; }
+  function gtAllExcLink() { return gtBase() + "/#exceptions2,dateRange:(interval:Yesterday),entityType:Device"; }
+
+  function formatTime() {
+    var d = new Date();
+    try { return d.toLocaleString("en-AU", { timeZone: "Australia/Brisbane", weekday: "short", day: "numeric", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" }) + " AEST"; }
+    catch (e) { return d.toLocaleString(); }
+  }
+
+  function isMech(v) {
+    var e = v.exceptions || {}, f = v.faults || {};
+    return (e.engineLight > 0 || e.engineFault > 0 || e.collision > 0 || f.critical > 0 || f.active > 0);
+  }
+
+  /* ── SVG Gauge ── */
+  function buildGaugeSVG(score, size) {
+    var sz = size || 72;
+    var r = 40;
+    var circ = 2 * Math.PI * r;
+    var half = circ / 2;
+    var pct = Math.max(0, Math.min(100, score)) / 100;
+    var offset = half - (half * pct);
+    var color, glowColor;
+    if (score >= 80) { color = C.success; glowColor = C.successGlow; }
+    else if (score >= 60) { color = C.warn; glowColor = C.warnGlow; }
+    else { color = C.danger; glowColor = C.dangerGlow; }
+    var svg = '<svg width="' + sz + '" height="' + (sz * 0.6) + '" viewBox="0 0 100 60" style="overflow:visible !important;">';
+    svg += '<path d="M 10 55 A 40 40 0 0 1 90 55" fill="none" stroke="' + C.borderLight + '" stroke-width="7" stroke-linecap="round" />';
+    svg += '<path d="M 10 55 A 40 40 0 0 1 90 55" fill="none" stroke="' + color + '" stroke-width="7" stroke-linecap="round" class="fha-gauge-arc" stroke-dasharray="' + half.toFixed(1) + '" stroke-dashoffset="' + offset.toFixed(1) + '" style="filter:drop-shadow(0 0 4px ' + glowColor + ');" />';
+    svg += '<text x="50" y="48" text-anchor="middle" style="font-size:22px !important;font-weight:700 !important;fill:' + color + ' !important;font-family:-apple-system,BlinkMacSystemFont,sans-serif !important;">' + score + '</text>';
+    svg += '<text x="50" y="58" text-anchor="middle" style="font-size:7px !important;fill:' + C.textMuted + ' !important;letter-spacing:1.5px !important;text-transform:uppercase !important;font-family:-apple-system,BlinkMacSystemFont,sans-serif !important;">HEALTH</text>';
+    svg += '</svg>';
+    return svg;
+  }
+
+  function miniScore(score) {
+    var color, bg, bd;
+    if (score >= 95) { color = C.successDark; bg = C.successBg; bd = C.successBorder; }
+    else if (score >= 80) { color = "#00695C"; bg = "#E0F2F1"; bd = "#B2DFDB"; }
+    else if (score >= 60) { color = C.warnDark; bg = C.warnBg; bd = C.warnBorder; }
+    else { color = C.dangerDark; bg = C.dangerBg; bd = C.dangerBorder; }
+    return '<span style="display:inline-flex !important;align-items:center !important;justify-content:center !important;min-width:36px !important;height:24px !important;border-radius:' + C.radius + ' !important;background:' + bg + ' !important;border:1px solid ' + bd + ' !important;font-size:12px !important;font-weight:700 !important;color:' + color + ' !important;padding:0 8px !important;">' + score + '</span>';
+  }
+
+  function btnStyle(variant) {
+    var base = "display:inline-flex !important;align-items:center !important;gap:6px !important;font-family:Roboto,'Segoe UI',sans-serif !important;font-size:12px !important;font-weight:500 !important;line-height:20px !important;border-radius:" + C.radius + " !important;padding:7px 14px !important;cursor:pointer !important;border:1px solid !important;text-decoration:none !important;white-space:nowrap !important;transition:background 0.15s ease !important;";
+    if (variant === "primary") return base + "background:" + C.blue + " !important;border-color:" + C.blue + " !important;color:" + C.textWhite + " !important;";
+    if (variant === "danger") return base + "background:" + C.danger + " !important;border-color:" + C.danger + " !important;color:" + C.textWhite + " !important;";
+    if (variant === "tertiary") return base + "background:transparent !important;border-color:transparent !important;color:" + C.blue + " !important;";
+    return base + "background:" + C.bgMain + " !important;border-color:" + C.border + " !important;color:" + C.textPrimary + " !important;";
+  }
+
+  function mkPill(label, type) {
+    var bg, bd, cl;
+    if (type === "danger" || type === "mech") { bg = C.dangerBg; bd = C.dangerBorder; cl = C.dangerDark; }
+    else if (type === "warn") { bg = C.warnBg; bd = C.warnBorder; cl = C.warnDark; }
+    else { bg = C.bgSecondary; bd = C.borderLight; cl = C.textSecondary; }
+    return '<span style="display:inline-flex !important;align-items:center !important;gap:3px !important;background:' + bg + ' !important;border:1px solid ' + bd + ' !important;border-radius:' + C.radius + ' !important;padding:2px 8px !important;font-size:11px !important;font-weight:500 !important;color:' + cl + ' !important;margin:0 4px 4px 0 !important;">' + esc(label) + '</span>';
+  }
+
+  function buildPills(v) {
+    var e = v.exceptions || {}, f = v.faults || {}, h = "";
+    if (e.engineLight > 0) h += mkPill(e.engineLight + " engine light", "mech");
+    if (e.engineFault > 0) h += mkPill(e.engineFault + " engine fault", "mech");
+    if (e.collision > 0) h += mkPill(e.collision + " collision", "mech");
+    if (f.critical > 0) h += mkPill(f.critical + " critical DTC", "mech");
+    if (f.active > 0) h += mkPill(f.active + " active DTC", "mech");
+    if (e.seatbelt > 0) h += mkPill(e.seatbelt + " seatbelt", "danger");
+    if (e.speeding > 0) h += mkPill(e.speeding + " speeding", "danger");
+    if (e.cornering > 0) h += mkPill(e.cornering + " cornering", "warn");
+    if (e.braking > 0) h += mkPill(e.braking + " braking", "warn");
+    if (e.accel > 0) h += mkPill(e.accel + " accel", "warn");
+    h += mkPill((v.trips || 0) + " trips", "neutral");
+    if (v.distKm > 0) h += mkPill(v.distKm + " km", "neutral");
+    return h;
+  }
+
+  /* ── Vehicle card v5 ── */
+  function buildCard(v, idx) {
+    var sc = v.healthScore || 0, did = v.deviceId || "";
+    var accentColor;
+    if (sc < 60) { accentColor = C.danger; }
+    else if (sc < 80) { accentColor = C.warn; }
+    else { accentColor = C.success; }
+    var h = '<div style="margin:0 0 8px 0 !important;background:' + C.bgMain + ' !important;border:1px solid ' + C.borderLight + ' !important;border-left:3px solid ' + accentColor + ' !important;border-radius:' + C.radius + ' !important;padding:12px 14px !important;">';
+    h += '<div style="display:flex !important;align-items:center !important;justify-content:space-between !important;margin:0 0 10px 0 !important;">';
+    h += '<div style="display:flex !important;align-items:center !important;gap:8px !important;">';
+    h += '<span style="font-size:13px !important;font-weight:600 !important;color:' + C.textPrimary + ' !important;">' + esc(v.deviceName) + '</span>';
+    if (v.groupName) h += '<span style="font-size:10px !important;color:' + C.textMuted + ' !important;background:' + C.bgSecondary + ' !important;padding:2px 6px !important;border-radius:' + C.radiusFull + ' !important;">' + esc(v.groupName) + '</span>';
+    h += '</div>';
+    h += miniScore(sc);
+    h += '</div>';
+    h += '<div style="margin:0 0 10px 0 !important;line-height:1.8 !important;">' + buildPills(v) + '</div>';
+    if (v.aiDiagnosis) {
+      h += '<div style="margin:0 0 10px 0 !important;padding:10px 14px !important;background:' + C.blueLight + ' !important;border-radius:' + C.radius + ' !important;border-left:3px solid ' + C.blue + ' !important;">';
+      h += '<div style="display:flex !important;align-items:center !important;gap:5px !important;margin:0 0 4px 0 !important;">';
+      h += '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="' + C.blue + '" stroke-width="2" stroke-linecap="round"><path d="M12 2a4 4 0 0 1 4 4v2a8 8 0 0 1-8 0V6a4 4 0 0 1 4-4z"/><path d="M8 14s1.5 2 4 2 4-2 4-2"/><path d="M9 18h6"/><path d="M10 22h4"/></svg>';
+      h += '<span style="font-size:10px !important;font-weight:600 !important;color:' + C.blue + ' !important;">AI Diagnosis</span>';
+      h += '</div>';
+      h += '<div style="font-size:12px !important;color:' + C.textPrimary + ' !important;line-height:1.55 !important;">' + esc(v.aiDiagnosis) + '</div>';
+      if (v.aiRecommendation) {
+        h += '<div style="font-size:11px !important;color:' + C.textSecondary + ' !important;margin:6px 0 0 0 !important;padding:6px 0 0 0 !important;border-top:1px solid ' + C.borderLight + ' !important;"><strong style="color:' + C.blue + ' !important;">Action:</strong> ' + esc(v.aiRecommendation) + '</div>';
+      }
+      h += '</div>';
+    }
+    /* Fault Code Intelligence — only for vehicles with actual DTCs, not driver behaviour */
+    var fci = v.faultCodeIntel || [];
+    var hasFaults = v.faults && v.faults.total > 0;
+    if (fci.length > 0 && hasFaults) {
+      h += '<div style="margin:0 0 10px 0 !important;border:1px solid ' + C.borderLight + ' !important;border-radius:' + C.radius + ' !important;overflow:hidden !important;">';
+      h += '<div style="display:flex !important;align-items:center !important;gap:5px !important;padding:8px 12px !important;background:' + C.bgSecondary + ' !important;border-bottom:1px solid ' + C.borderLight + ' !important;cursor:pointer !important;" onclick="var el=this.parentNode.querySelector(\'[data-fci]\');if(el){var v=el.style.display===\'none\';el.style.cssText=v?\'display:block !important;\':\'display:none !important;\';this.querySelector(\'[data-chev]\').textContent=v?\'\u25BC\':\'\u25B6\';}">';
+      h += '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="' + C.dangerDark + '" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>';
+      h += '<span style="font-size:10px !important;font-weight:600 !important;color:' + C.dangerDark + ' !important;">Fault Code Intelligence</span>';
+      h += '<span style="font-size:10px !important;color:' + C.textMuted + ' !important;margin:0 0 0 2px !important;">(' + fci.length + ')</span>';
+      h += '<span style="font-size:10px !important;color:' + C.textMuted + ' !important;margin:0 0 0 auto !important;" data-chev>\u25BC</span>';
+      h += '</div>';
+      h += '<div data-fci style="display:block !important;">';
+      for (var fi = 0; fi < fci.length; fi++) {
+        var fc = fci[fi];
+        var sevColor = fc.severity === "critical" ? C.dangerDark : fc.severity === "moderate" ? C.warnDark : C.textSecondary;
+        var sevBg = fc.severity === "critical" ? C.dangerBg : fc.severity === "moderate" ? C.warnBg : C.bgSecondary;
+        h += '<div style="padding:10px 12px !important;border-bottom:1px solid ' + C.borderSubtle + ' !important;">';
+        h += '<div style="display:flex !important;align-items:center !important;gap:6px !important;margin:0 0 6px 0 !important;">';
+        h += '<span style="font-size:11px !important;font-weight:700 !important;font-family:monospace !important;color:' + C.textPrimary + ' !important;background:' + C.bgSecondary + ' !important;padding:2px 6px !important;border-radius:3px !important;border:1px solid ' + C.borderLight + ' !important;">' + esc(fc.code || "Unknown") + '</span>';
+        h += '<span style="font-size:10px !important;font-weight:600 !important;color:' + sevColor + ' !important;background:' + sevBg + ' !important;padding:2px 8px !important;border-radius:' + C.radiusFull + ' !important;text-transform:uppercase !important;">' + esc(fc.severity || "unknown") + '</span>';
+        h += '</div>';
+        if (fc.meaning) h += '<div style="font-size:12px !important;color:' + C.textPrimary + ' !important;line-height:1.5 !important;margin:0 0 4px 0 !important;">' + esc(fc.meaning) + '</div>';
+        if (fc.likelyCause) h += '<div style="font-size:11px !important;color:' + C.textSecondary + ' !important;line-height:1.4 !important;"><strong style="color:' + C.textPrimary + ' !important;">Likely cause:</strong> ' + esc(fc.likelyCause) + '</div>';
+        if (fc.estimatedRepair) h += '<div style="font-size:11px !important;color:' + C.textSecondary + ' !important;line-height:1.4 !important;margin:2px 0 0 0 !important;"><strong style="color:' + C.textPrimary + ' !important;">Repair:</strong> ' + esc(fc.estimatedRepair) + '</div>';
+        h += '</div>';
+      }
+      h += '</div></div>';
+    }
+    /* Driver Coaching Card */
+    var dc = v.driverCoaching;
+    if (dc) {
+      var gradeColors = { A: C.successDark, B: "#00695C", C: C.warnDark, D: "#E65100", F: C.dangerDark };
+      var gradeBgs = { A: C.successBg, B: "#E0F2F1", C: C.warnBg, D: "#FFF3E0", F: C.dangerBg };
+      var gc = gradeColors[dc.rating] || C.textMuted;
+      var gb = gradeBgs[dc.rating] || C.bgSecondary;
+      h += '<div style="margin:0 0 10px 0 !important;border:1px solid ' + C.borderLight + ' !important;border-radius:' + C.radius + ' !important;overflow:hidden !important;">';
+      /* Header - collapsible */
+      h += '<div style="display:flex !important;align-items:center !important;gap:8px !important;padding:10px 12px !important;background:' + C.bgSecondary + ' !important;border-bottom:1px solid ' + C.borderLight + ' !important;cursor:pointer !important;" onclick="var el=this.parentNode.querySelector(\'[data-coach]\');if(el){var v=el.style.display===\'none\';el.style.cssText=v?\'display:block !important;\':\'display:none !important;\';this.querySelector(\'[data-chev]\').textContent=v?\'\u25BC\':\'\u25B6\';}">';
+      h += '<div style="width:28px !important;height:28px !important;border-radius:50% !important;background:' + gb + ' !important;border:2px solid ' + gc + ' !important;display:flex !important;align-items:center !important;justify-content:center !important;flex-shrink:0 !important;">';
+      h += '<span style="font-size:14px !important;font-weight:800 !important;color:' + gc + ' !important;">' + esc(dc.rating) + '</span>';
+      h += '</div>';
+      h += '<div style="flex:1 !important;min-width:0 !important;">';
+      h += '<div style="display:flex !important;align-items:center !important;gap:6px !important;">';
+      h += '<span style="font-size:10px !important;font-weight:600 !important;color:' + C.textPrimary + ' !important;">Driver Coaching</span>';
+      h += '<span style="font-size:10px !important;font-weight:600 !important;color:' + gc + ' !important;">' + esc(dc.ratingLabel) + '</span>';
+      h += '</div>';
+      h += '<div style="font-size:11px !important;color:' + C.textSecondary + ' !important;margin:2px 0 0 0 !important;white-space:nowrap !important;overflow:hidden !important;text-overflow:ellipsis !important;">' + esc(dc.summary) + '</div>';
+      h += '</div>';
+      h += '<span style="font-size:10px !important;color:' + C.textMuted + ' !important;" data-chev>\u25BC</span>';
+      h += '</div>';
+      /* Body */
+      h += '<div data-coach style="display:block !important;padding:12px !important;">';
+      /* Positives */
+      if (dc.positives && dc.positives.length > 0) {
+        h += '<div style="margin:0 0 10px 0 !important;">';
+        h += '<div style="font-size:11px !important;font-weight:600 !important;color:' + C.successDark + ' !important;margin:0 0 6px 0 !important;">What\'s going well</div>';
+        for (var pi = 0; pi < dc.positives.length; pi++) {
+          h += '<div style="font-size:11px !important;color:' + C.textPrimary + ' !important;padding:3px 0 !important;line-height:1.4 !important;">\u2022 ' + esc(dc.positives[pi]) + '</div>';
+        }
+        h += '</div>';
+      }
+      /* Improvements */
+      if (dc.improvements && dc.improvements.length > 0) {
+        h += '<div style="margin:0 0 10px 0 !important;">';
+        h += '<div style="font-size:11px !important;font-weight:600 !important;color:' + C.warnDark + ' !important;margin:0 0 6px 0 !important;">Areas to improve</div>';
+        for (var ii = 0; ii < dc.improvements.length; ii++) {
+          var imp = dc.improvements[ii];
+          h += '<div style="background:' + C.warnBg + ' !important;border-radius:4px !important;padding:8px 10px !important;margin:0 0 6px 0 !important;">';
+          h += '<div style="font-size:11px !important;font-weight:600 !important;color:' + C.textPrimary + ' !important;margin:0 0 2px 0 !important;">' + esc(imp.issue) + '</div>';
+          h += '<div style="font-size:11px !important;color:' + C.textSecondary + ' !important;line-height:1.4 !important;">' + esc(imp.detail) + '</div>';
+          h += '<div style="font-size:11px !important;color:' + C.blue + ' !important;margin:4px 0 0 0 !important;font-weight:500 !important;">Tip: ' + esc(imp.tip) + '</div>';
+          h += '</div>';
+        }
+        h += '</div>';
+      }
+      /* Goal */
+      if (dc.goalForNextWeek) {
+        h += '<div style="background:' + C.blueLight + ' !important;border-radius:' + C.radius + ' !important;padding:8px 10px !important;margin:0 0 10px 0 !important;border-left:3px solid ' + C.blue + ' !important;">';
+        h += '<div style="font-size:11px !important;font-weight:600 !important;color:' + C.blue + ' !important;margin:0 0 3px 0 !important;">Goal for next week</div>';
+        h += '<div style="font-size:12px !important;color:' + C.textPrimary + ' !important;line-height:1.4 !important;">' + esc(dc.goalForNextWeek) + '</div>';
+        h += '</div>';
+      }
+      /* Send to Driver button */
+      h += '<button onclick="sendCoachingCard(\'' + esc(v.deviceName).replace(/'/g, "\\'") + '\',' + idx + ');return false;" style="' + btnStyle("secondary") + 'width:100% !important;padding:8px 12px !important;font-size:11px !important;display:flex !important;align-items:center !important;justify-content:center !important;gap:6px !important;">';
+      h += '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg>';
+      h += 'Send Coaching Card to Driver</button>';
+      h += '</div></div>';
+    }
+    h += '<div style="display:flex !important;align-items:center !important;gap:6px !important;">';
+    h += '<a href="' + gtExcLink(did) + '" target="_top" style="' + btnStyle("primary") + 'font-size:11px !important;padding:5px 10px !important;">Exceptions \u2192</a>';
+    h += '<a href="' + gtTripsLink(did) + '" target="_top" style="' + btnStyle("tertiary") + 'font-size:11px !important;padding:5px 8px !important;">Trips</a>';
+    h += '<a href="' + gtMapLink(did) + '" target="_top" style="' + btnStyle("tertiary") + 'font-size:11px !important;padding:5px 8px !important;">Map</a>';
+    h += '</div>';
+    h += '</div>';
+    return h;
+  }
+
+  /* ── Settings panel v5 ── */
+  function buildSettingsPanel() {
+    var h = '<div style="margin:0 0 16px 0 !important;background:' + C.bgMain + ' !important;border:1px solid ' + C.borderLight + ' !important;border-radius:' + C.radius + ' !important;overflow:hidden !important;">';
+    h += '<div style="padding:12px 16px !important;background:' + C.bgSecondary + ' !important;border-bottom:1px solid ' + C.borderLight + ' !important;display:flex !important;align-items:center !important;justify-content:space-between !important;">';
+    h += '<span style="font-size:13px !important;font-weight:600 !important;color:' + C.textPrimary + ' !important;">Email Settings</span>';
+    h += '<button id="fha-close-set" style="background:none !important;border:none !important;font-size:18px !important;color:' + C.textSecondary + ' !important;cursor:pointer !important;padding:4px !important;">&times;</button>';
+    h += '</div>';
+
+    /* Recipient selection - Geotab users dropdown */
+    h += '<div style="padding:12px 16px !important;border-bottom:1px solid ' + C.borderSubtle + ' !important;">';
+    h += '<label style="display:block !important;font-size:11px !important;font-weight:600 !important;color:' + C.textSecondary + ' !important;margin:0 0 6px 0 !important;">Primary Recipient</label>';
+    h += '<select id="fha-cfg-recipient" style="width:100% !important;padding:8px 12px !important;border:1px solid ' + C.borderLight + ' !important;border-radius:' + C.radius + ' !important;font-size:12px !important;color:' + C.textPrimary + ' !important;background:' + C.bgMain + ' !important;outline:none !important;cursor:pointer !important;">';
+    h += '<option value="' + esc(currentUserEmail) + '">Me (' + esc(currentUserEmail) + ')</option>';
+    for (var i = 0; i < geotabUsers.length; i++) {
+      var u = geotabUsers[i];
+      if (u.email.toLowerCase() === currentUserEmail.toLowerCase()) continue;
+      var label = u.displayName.trim() ? u.displayName.trim() + ' (' + u.email + ')' : u.email;
+      var sel = (u.email === emailConfig.recipient) ? ' selected' : '';
+      h += '<option value="' + esc(u.email) + '"' + sel + '>' + esc(label) + '</option>';
+    }
+    h += '</select></div>';
+
+    /* Additional recipients */
+    h += '<div style="padding:12px 16px !important;border-bottom:1px solid ' + C.borderSubtle + ' !important;">';
+    h += '<label style="display:block !important;font-size:11px !important;font-weight:600 !important;color:' + C.textSecondary + ' !important;margin:0 0 6px 0 !important;">Additional Recipients</label>';
+    h += '<div id="fha-recipients-list" style="margin:0 0 6px 0 !important;"></div>';
+    h += '<div style="display:flex !important;gap:6px !important;">';
+    h += '<select id="fha-add-recipient" style="flex:1 !important;padding:7px 10px !important;border:1px solid ' + C.borderLight + ' !important;border-radius:' + C.radius + ' !important;font-size:11px !important;color:' + C.textPrimary + ' !important;background:' + C.bgMain + ' !important;outline:none !important;">';
+    h += '<option value="">Add a Geotab user\u2026</option>';
+    for (var j = 0; j < geotabUsers.length; j++) {
+      var gu = geotabUsers[j];
+      var glabel = gu.displayName.trim() ? gu.displayName.trim() + ' \u2014 ' + gu.email : gu.email;
+      h += '<option value="' + esc(gu.email) + '">' + esc(glabel) + '</option>';
+    }
+    h += '</select>';
+    h += '<button id="fha-add-recip-btn" style="' + btnStyle('secondary') + 'font-size:11px !important;padding:5px 10px !important;white-space:nowrap !important;">+ Add</button>';
+    h += '</div>';
+    h += '<div style="display:flex !important;gap:6px !important;margin:6px 0 0 0 !important;">';
+    h += '<input id="fha-custom-email" type="email" placeholder="Or type an email\u2026" style="flex:1 !important;padding:7px 10px !important;border:1px solid ' + C.borderLight + ' !important;border-radius:' + C.radius + ' !important;font-size:11px !important;color:' + C.textPrimary + ' !important;background:' + C.bgMain + ' !important;outline:none !important;" />';
+    h += '<button id="fha-add-custom-btn" style="' + btnStyle('secondary') + 'font-size:11px !important;padding:5px 10px !important;white-space:nowrap !important;">+ Add</button>';
+    h += '</div></div>';
+
+    /* Auto-send toggle */
+    h += '<div style="padding:12px 16px !important;border-bottom:1px solid ' + C.borderSubtle + ' !important;display:flex !important;align-items:center !important;justify-content:space-between !important;">';
+    h += '<div><div style="font-size:13px !important;font-weight:500 !important;color:' + C.textPrimary + ' !important;">Auto-send daily briefing</div>';
+    h += '<div style="font-size:11px !important;color:' + C.textMuted + ' !important;margin:2px 0 0 0 !important;">Automated fleet health email on schedule</div></div>';
+    var chk = emailConfig.autoEmail;
+    h += '<div id="fha-toggle-wrap" style="width:40px !important;height:22px !important;border-radius:11px !important;background:' + (chk ? C.blue : C.border) + ' !important;cursor:pointer !important;position:relative !important;flex-shrink:0 !important;transition:background 0.2s !important;">';
+    h += '<div id="fha-toggle-dot" style="position:absolute !important;top:2px !important;left:' + (chk ? '20px' : '2px') + ' !important;width:18px !important;height:18px !important;background:#fff !important;border-radius:50% !important;box-shadow:0 1px 3px rgba(0,0,0,0.2) !important;transition:left 0.2s cubic-bezier(0.4,0,0.2,1) !important;"></div>';
+    h += '</div></div>';
+
+    /* Schedule time */
+    h += '<div style="padding:12px 16px !important;border-bottom:1px solid ' + C.borderSubtle + ' !important;">';
+    h += '<label style="display:block !important;font-size:11px !important;font-weight:600 !important;color:' + C.textSecondary + ' !important;margin:0 0 6px 0 !important;">Schedule Time (AEST)</label>';
+    h += '<div style="display:flex !important;gap:8px !important;align-items:center !important;">';
+    h += '<select id="fha-cfg-hour" style="padding:8px 12px !important;border:1px solid ' + C.borderLight + ' !important;border-radius:' + C.radius + ' !important;font-size:13px !important;color:' + C.textPrimary + ' !important;background:' + C.bgMain + ' !important">';
+    for (var hh = 0; hh < 24; hh++) { var hl = hh < 10 ? '0' + hh : '' + hh; h += '<option value="' + hh + '"' + (hh === emailConfig.scheduleHour ? ' selected' : '') + '>' + hl + '</option>'; }
+    h += '</select>';
+    h += '<span style="font-size:14px !important;font-weight:600 !important;color:' + C.textMuted + ' !important;">:</span>';
+    h += '<select id="fha-cfg-min" style="padding:8px 12px !important;border:1px solid ' + C.borderLight + ' !important;border-radius:' + C.radius + ' !important;font-size:13px !important;color:' + C.textPrimary + ' !important;background:' + C.bgMain + ' !important">';
+    var ms = [0, 15, 30, 45]; for (var mi = 0; mi < ms.length; mi++) { var ml = ms[mi] < 10 ? '0' + ms[mi] : '' + ms[mi]; h += '<option value="' + ms[mi] + '"' + (ms[mi] === emailConfig.scheduleMin ? ' selected' : '') + '>' + ml + '</option>'; }
+    h += '</select></div></div>';
+
+    /* Report scope — Group picker */
+    h += '<div style="padding:12px 16px !important;border-bottom:1px solid ' + C.borderSubtle + ' !important;">';
+    h += '<label style="display:block !important;font-size:11px !important;font-weight:600 !important;color:' + C.textSecondary + ' !important;margin:0 0 6px 0 !important;">Report Scope</label>';
+    h += '<select id="fha-cfg-group" style="width:100% !important;padding:8px 12px !important;border:1px solid ' + C.borderLight + ' !important;border-radius:' + C.radius + ' !important;font-size:12px !important;color:' + C.textPrimary + ' !important;background:' + C.bgMain + ' !important;outline:none !important;cursor:pointer !important;">';
+    h += '<option value="">All Vehicles (entire fleet)</option>';
+    for (var gi = 0; gi < geotabGroups.length; gi++) {
+      var grp = geotabGroups[gi];
+      var gsel = (grp.id === emailConfig.reportGroupId) ? ' selected' : '';
+      h += '<option value="' + esc(grp.id) + '" data-group-name="' + esc(grp.name) + '"' + gsel + '>' + esc(grp.name) + '</option>';
+    }
+    h += '</select>';
+    if (activeGroupFilter.length > 0) {
+      h += '<div style="font-size:10px !important;color:' + C.blue + ' !important;margin:4px 0 0 0 !important;font-weight:500 !important;">\u2139 MyGeotab group filter active: ' + esc(activeGroupNames.join(", ")) + ' (overrides this setting)</div>';
+    } else if (geotabGroups.length === 0) {
+      h += '<div style="font-size:10px !important;color:' + C.textMuted + ' !important;margin:4px 0 0 0 !important;">Loading groups\u2026</div>';
+    }
+    h += '</div>';
+
+    /* Webhook URL configuration */
+    h += '<div style="padding:12px 16px !important;border-bottom:1px solid ' + C.borderSubtle + ' !important;">';
+    h += '<label style="display:block !important;font-size:11px !important;font-weight:600 !important;color:' + C.textSecondary + ' !important;margin:0 0 6px 0 !important;">Scanner Webhook URL</label>';
+    h += '<input id="fha-cfg-webhook" type="text" value="' + esc(emailConfig.webhookUrl || "") + '" placeholder="https://your-server.com/n8n/webhook/fleet-health-scan" style="width:100% !important;padding:8px 10px !important;border:1px solid ' + C.borderLight + ' !important;border-radius:' + C.radius + ' !important;font-size:11px !important;color:' + C.textPrimary + ' !important;background:' + C.bgMain + ' !important;outline:none !important;" />';
+    h += '<div style="font-size:10px !important;color:' + C.textMuted + ' !important;margin:4px 0 0 0 !important;">The n8n webhook endpoint that processes fleet scans</div>';
+    h += '</div>';
+
+    /* Save */
+    h += '<div style="padding:12px 16px !important;border-bottom:1px solid ' + C.borderLight + ' !important;">';
+    h += '<button id="fha-save-set" style="' + btnStyle('primary') + 'width:100% !important;">Save Settings</button>';
+    h += '</div>';
+
+    /* Send Report Now */
+    h += '<div style="padding:12px 16px !important;background:' + C.blueLight + ' !important;">';
+    h += '<label style="display:block !important;font-size:11px !important;font-weight:600 !important;color:' + C.blue + ' !important;margin:0 0 8px 0 !important;">Send Report Now</label>';
+    h += '<div style="display:flex !important;align-items:center !important;gap:8px !important;">';
+    h += '<span style="display:flex !important;align-items:center !important;justify-content:center !important;width:28px !important;height:28px !important;border-radius:50% !important;background:' + C.blue + ' !important;color:' + C.textWhite + ' !important;flex-shrink:0 !important;"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg></span>';
+    h += '<div style="flex:1 !important;min-width:0 !important;">';
+    var rcptCount = 1 + emailConfig.additionalRecipients.length;
+    var rcptLabel = rcptCount === 1 ? (emailConfig.recipient || currentUserEmail) : rcptCount + " recipients";
+    h += '<div style="font-size:12px !important;font-weight:500 !important;color:' + C.textPrimary + ' !important;">' + esc(rcptLabel) + '</div>';
+    var scopeLabel = getEffectiveGroupLabel();
+    h += '<div style="font-size:10px !important;color:' + C.textMuted + ' !important;overflow:hidden !important;text-overflow:ellipsis !important;white-space:nowrap !important;">' + esc(scopeLabel) + '</div>';
+    h += '</div>';
+    var sendLabel = rcptCount > 1 ? "Send to All" : "Send Report";
+    h += '<button id="fha-send-me" style="' + btnStyle('primary') + 'font-size:11px !important;padding:5px 12px !important;white-space:nowrap !important;">' + sendLabel + '</button>';
+    h += '</div></div>';
+    h += '</div>';
+    return h;
+  }
+
+  function sectionHead(label, count, color, icon, sectionId, collapsed) {
+    var chevron = collapsed ? '\u25B6' : '\u25BC';
+    return '<div id="fha-sh-' + sectionId + '" style="display:flex !important;align-items:center !important;gap:8px !important;margin:16px 0 8px 0 !important;cursor:pointer !important;user-select:none !important;padding:8px 0 !important;border-bottom:1px solid ' + C.borderLight + ' !important;" data-section="' + sectionId + '">' +
+      '<span id="fha-chev-' + sectionId + '" style="font-size:9px !important;color:' + C.textMuted + ' !important;">' + chevron + '</span>' +
+      '<span style="font-size:13px !important;font-weight:600 !important;color:' + color + ' !important;font-family:Roboto,\'Segoe UI\',sans-serif !important;">' + esc(label) + '</span>' +
+      '<span style="font-size:11px !important;color:' + C.textMuted + ' !important;background:' + C.bgSecondary + ' !important;padding:1px 8px !important;border-radius:' + C.radius + ' !important;font-weight:600 !important;border:1px solid ' + C.borderLight + ' !important;">' + count + '</span>' +
+      '</div>';
+  }
+
+  /* ── Setup wizard (first run) ── */
+  function showSetup() {
+    var h = '<div style="padding:16px 20px !important;font-family:Roboto,\'Segoe UI\',Segoe,\'Helvetica Neue\',Helvetica,sans-serif !important;">';
+    h += '<div style="margin:0 0 24px 0 !important;border-bottom:1px solid ' + C.borderLight + ' !important;padding:0 0 10px 0 !important;">';
+    h += '<div style="font-size:28px !important;font-weight:300 !important;color:' + C.textPrimary + ' !important;line-height:36px !important;">Fleet Health Autopilot</div>';
+    h += '<div style="font-size:11px !important;color:' + C.textMuted + ' !important;margin:2px 0 0 0 !important;">' + esc(currentDb) + '</div></div>';
+    /* Setup card */
+    h += '<div style="background:' + C.bgMain + ' !important;border:1px solid ' + C.borderLight + ' !important;border-radius:' + C.radius + ' !important;padding:32px !important;">';
+    h += '<div style="text-align:center !important;margin:0 0 24px 0 !important;">';
+    h += '<div style="font-size:16px !important;font-weight:400 !important;color:' + C.textPrimary + ' !important;margin:0 0 6px 0 !important;">Quick Setup</div>';
+    h += '<div style="font-size:13px !important;color:' + C.textSecondary + ' !important;line-height:1.5 !important;">Connect to your Fleet Health Autopilot scanner to get started.</div>';
+    h += '</div>';
+    /* Webhook URL input */
+    h += '<div style="margin:0 0 16px 0 !important;">';
+    h += '<label style="display:block !important;font-size:11px !important;font-weight:600 !important;color:' + C.textSecondary + ' !important;margin:0 0 4px 0 !important;">Scanner Webhook URL</label>';
+    h += '<input id="fha-setup-url" type="text" placeholder="https://your-server.com/n8n/webhook/fleet-health-scan" style="width:100% !important;padding:8px 10px !important;border:1px solid ' + C.border + ' !important;border-radius:' + C.radiusSm + ' !important;font-size:13px !important;color:' + C.textPrimary + ' !important;outline:none !important;background:' + C.bgMain + ' !important;" />';
+    h += '</div>';
+    /* Email recipient */
+    h += '<div style="margin:0 0 20px 0 !important;">';
+    h += '<label style="display:block !important;font-size:11px !important;font-weight:600 !important;color:' + C.textSecondary + ' !important;margin:0 0 4px 0 !important;">Email Reports To</label>';
+    h += '<input id="fha-setup-email" type="text" value="' + esc(currentUserEmail) + '" style="width:100% !important;padding:8px 10px !important;border:1px solid ' + C.border + ' !important;border-radius:' + C.radiusSm + ' !important;font-size:13px !important;color:' + C.textPrimary + ' !important;outline:none !important;background:' + C.bgMain + ' !important;" />';
+    h += '</div>';
+    /* Status message area */
+    h += '<div id="fha-setup-status" style="display:none !important;padding:8px 12px !important;border-radius:' + C.radiusSm + ' !important;font-size:12px !important;margin:0 0 16px 0 !important;"></div>';
+    /* Buttons */
+    h += '<div style="display:flex !important;gap:10px !important;">';
+    h += '<button id="fha-setup-test" style="' + btnStyle("secondary") + 'flex:1 !important;padding:10px !important;font-size:13px !important;font-weight:600 !important;">Test Connection</button>';
+    h += '<button id="fha-setup-save" style="' + btnStyle("primary") + 'flex:1 !important;padding:10px !important;font-size:13px !important;font-weight:600 !important;">Save &amp; Start</button>';
+    h += '</div></div></div>';
+    elApp.innerHTML = h;
+    /* Bind events */
+    var testBtn = document.getElementById("fha-setup-test");
+    if (testBtn) testBtn.onclick = function () {
+      var urlInput = document.getElementById("fha-setup-url");
+      var statusEl = document.getElementById("fha-setup-status");
+      var testUrl = (urlInput ? urlInput.value : "").replace(/\s+/g, "");
+      if (!testUrl) { showSetupStatus(statusEl, "Please enter a webhook URL", "error"); return false; }
+      showSetupStatus(statusEl, "Testing connection\u2026", "info");
+      testBtn.textContent = "Testing\u2026";
+      testBtn.style.opacity = "0.6";
+      var xhr = new XMLHttpRequest();
+      xhr.open("POST", testUrl, true);
+      xhr.setRequestHeader("Content-Type", "application/json");
+      xhr.timeout = 15000;
+      xhr.onload = function () {
+        testBtn.textContent = "Test Connection";
+        testBtn.style.opacity = "1";
+        if (xhr.status >= 200 && xhr.status < 300) {
+          showSetupStatus(statusEl, "\u2713 Connected successfully!", "success");
+        } else {
+          showSetupStatus(statusEl, "Server returned status " + xhr.status, "error");
+        }
+      };
+      xhr.onerror = function () { testBtn.textContent = "Test Connection"; testBtn.style.opacity = "1"; showSetupStatus(statusEl, "Connection failed. Check URL and server.", "error"); };
+      xhr.ontimeout = function () { testBtn.textContent = "Test Connection"; testBtn.style.opacity = "1"; showSetupStatus(statusEl, "Connection timed out.", "error"); };
+      xhr.send(JSON.stringify({ ping: true, database: currentDb }));
+      return false;
+    };
+    var saveBtn = document.getElementById("fha-setup-save");
+    if (saveBtn) saveBtn.onclick = function () {
+      var urlInput = document.getElementById("fha-setup-url");
+      var emailInput = document.getElementById("fha-setup-email");
+      var statusEl = document.getElementById("fha-setup-status");
+      var testUrl = (urlInput ? urlInput.value : "").replace(/\s+/g, "");
+      if (!testUrl) { showSetupStatus(statusEl, "Please enter a webhook URL", "error"); return false; }
+      emailConfig.webhookUrl = testUrl;
+      emailConfig.recipient = emailInput ? emailInput.value : currentUserEmail;
+      webhookBase = testUrl;
+      saveConfig();
+      showIdle();
+      return false;
+    };
+  }
+
+  function showSetupStatus(el, msg, type) {
+    if (!el) return;
+    el.style.display = "block !important";
+    el.setAttribute("style", "display:block !important;padding:8px 12px !important;border-radius:" + C.radiusSm + " !important;font-size:12px !important;margin:0 0 16px 0 !important;" +
+      (type === "success" ? "background:" + C.successBg + " !important;color:" + C.successDark + " !important;border:1px solid " + C.success + " !important;" :
+       type === "error" ? "background:" + C.dangerBg + " !important;color:" + C.dangerDark + " !important;border:1px solid " + C.danger + " !important;" :
+       "background:" + C.blueLight + " !important;color:" + C.blueDark + " !important;border:1px solid " + C.blue + " !important;"));
+    el.textContent = msg;
+  }
+
+  /* ── Idle state v5 ── */
+  function showIdle() {
+    /* If no webhook URL configured, show setup wizard */
+    if (!webhookBase) { showSetup(); return; }
+    var greeting = greetings[greetingIndex % greetings.length];
+    var h = '<div style="padding:16px 20px !important;font-family:Roboto,\'Segoe UI\',Segoe,\'Helvetica Neue\',Helvetica,sans-serif !important;">';
+    h += '<div style="display:flex !important;align-items:center !important;justify-content:space-between !important;margin:0 0 24px 0 !important;border-bottom:1px solid ' + C.borderLight + ' !important;padding:0 0 10px 0 !important;">';
+    h += '<div>';
+    h += '<div style="font-size:28px !important;font-weight:300 !important;color:' + C.textPrimary + ' !important;line-height:36px !important;">Fleet Health Autopilot</div>';
+    if (activeGroupFilter.length > 0) {
+      h += '<div style="font-size:10px !important;color:' + C.blue + ' !important;margin:2px 0 0 0 !important;font-weight:500 !important;">' + esc(activeGroupNames.join(", ")) + '</div>';
+    }
+    h += '</div>';
+    h += '<button id="fha-settings-btn" style="' + btnStyle("secondary") + 'font-size:11px !important;padding:5px 10px !important;">Email Settings</button>';
+    h += '</div>';
+    h += '<div id="fha-settings-panel" style="display:none !important;">' + buildSettingsPanel() + '</div>';
+    h += '<div style="background:' + C.bgMain + ' !important;border:1px solid ' + C.borderLight + ' !important;border-radius:' + C.radius + ' !important;padding:40px 32px !important;text-align:center !important;">';
+    /* Welcome greeting */
+    h += '<div style="font-size:22px !important;font-weight:300 !important;color:' + C.textPrimary + ' !important;margin:0 0 4px 0 !important;">Welcome back, ' + esc(currentFirstName) + '</div>';
+    h += '<div style="font-size:13px !important;color:' + C.textSecondary + ' !important;margin:0 0 24px 0 !important;line-height:1.6 !important;">' + esc(greeting) + '</div>';
+    /* Scan button */
+    h += '<div style="display:flex !important;gap:10px !important;justify-content:center !important;">';
+    h += '<button id="fha-scan-btn" style="' + btnStyle("primary") + 'padding:10px 28px !important;font-size:13px !important;font-weight:500 !important;">';
+    h += '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"/></svg>';
+    h += ' Run Scan</button>';
+    h += '</div></div>';
+    if (lastData) {
+      h += '<div style="margin:16px 0 0 0 !important;text-align:center !important;">';
+      h += '<button id="fha-showlast-btn" style="' + btnStyle("tertiary") + '">Show last scan results</button>';
+      h += '</div>';
+    }
+    h += '</div>';
+    elApp.innerHTML = h;
+    var scanBtn = document.getElementById("fha-scan-btn");
+    if (scanBtn) scanBtn.onclick = function () { triggerScan(false); return false; };
+    var showLastBtn = document.getElementById("fha-showlast-btn");
+    if (showLastBtn) showLastBtn.onclick = function () { render(lastData); return false; };
+    bindSettingsToggle();
+    greetingIndex++;
+  }
+
+  /* ── Loading state with Fleet Catcher game ── */
+  var gameTimer = null;
+  var gameScore = 0;
+  var gameMisses = 0;
+
+  function showLoading() {
+    gameScore = 0;
+    gameMisses = 0;
+    var h = '<div style="padding:16px 20px !important;font-family:Roboto,\'Segoe UI\',Segoe,\'Helvetica Neue\',Helvetica,sans-serif !important;">';
+    h += '<div style="font-size:28px !important;font-weight:300 !important;color:' + C.textPrimary + ' !important;line-height:36px !important;margin:0 0 16px 0 !important;padding:0 0 10px 0 !important;border-bottom:1px solid ' + C.borderLight + ' !important;">Fleet Health Autopilot</div>';
+
+    /* Progress bar section */
+    h += '<div style="background:' + C.bgMain + ' !important;border:1px solid ' + C.borderLight + ' !important;border-radius:' + C.radius + ' !important;padding:14px 16px !important;margin:0 0 12px 0 !important;">';
+    h += '<div style="display:flex !important;align-items:center !important;gap:10px !important;margin:0 0 8px 0 !important;">';
+    h += '<div style="width:20px !important;height:20px !important;border-radius:50% !important;background:' + C.blueLight + ' !important;display:flex !important;align-items:center !important;justify-content:center !important;animation:fha-pulse 1.5s ease-in-out infinite !important;flex-shrink:0 !important;">';
+    h += '<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="' + C.blue + '" stroke-width="3"><circle cx="12" cy="12" r="10"/></svg></div>';
+    h += '<span id="fha-load-step" style="font-size:12px !important;color:' + C.textPrimary + ' !important;font-weight:500 !important;">Scanning fleet health\u2026</span>';
+    h += '<span style="flex:1 !important;"></span>';
+    h += '<span id="fha-load-pct" style="font-size:11px !important;color:' + C.blue + ' !important;font-weight:700 !important;">10%</span>';
+    h += '</div>';
+    h += '<div class="fha-progress-track"><div class="fha-progress-bar" id="fha-progress" style="width:10%;"></div></div>';
+    h += '</div>';
+
+    /* Fleet Catcher game */
+    h += '<div style="background:' + C.bgMain + ' !important;border:1px solid ' + C.borderLight + ' !important;border-radius:' + C.radius + ' !important;padding:16px !important;">';
+    h += '<div style="display:flex !important;align-items:center !important;justify-content:space-between !important;margin:0 0 12px 0 !important;">';
+    h += '<div style="font-size:12px !important;font-weight:600 !important;color:' + C.textPrimary + ' !important;">Fleet Catcher</div>';
+    h += '<div style="font-size:10px !important;color:' + C.textMuted + ' !important;">Tap the vehicles while you wait!</div>';
+    h += '</div>';
+    h += '<div style="display:flex !important;justify-content:center !important;gap:16px !important;margin:0 0 12px 0 !important;">';
+    h += '<span style="font-size:12px !important;font-weight:700 !important;color:' + C.success + ' !important;" id="fha-game-score">\u2714 0</span>';
+    h += '<span style="font-size:12px !important;font-weight:700 !important;color:' + C.danger + ' !important;" id="fha-game-miss">\u2716 0</span>';
+    h += '</div>';
+    /* 4x3 grid */
+    h += '<div id="fha-game-grid" style="display:grid !important;grid-template-columns:repeat(4, 1fr) !important;gap:8px !important;max-width:320px !important;margin:0 auto !important;">';
+    for (var gi = 0; gi < 12; gi++) {
+      h += '<div class="fha-game-cell" data-cell="' + gi + '" style="width:100% !important;aspect-ratio:1 !important;border-radius:' + C.radiusMd + ' !important;background:' + C.bgSecondary + ' !important;border:2px solid ' + C.borderLight + ' !important;display:flex !important;align-items:center !important;justify-content:center !important;cursor:pointer !important;font-size:24px !important;user-select:none !important;transition:all 0.15s ease !important;"></div>';
+    }
+    h += '</div>';
+    h += '<div style="text-align:center !important;margin:10px 0 0 0 !important;font-size:10px !important;color:' + C.textMuted + ' !important;font-style:italic !important;">Click the vehicles before they escape!</div>';
+    h += '</div></div>';
+    elApp.innerHTML = h;
+
+    /* Progress step animation */
+    var steps = [
+      { pct: 25, text: "Fetching device data\u2026", delay: 2000 },
+      { pct: 45, text: "Analysing exceptions\u2026", delay: 5000 },
+      { pct: 65, text: "Running AI diagnostics\u2026", delay: 10000 },
+      { pct: 80, text: "Generating fleet insight\u2026", delay: 18000 },
+      { pct: 90, text: "Finalising report\u2026", delay: 25000 }
+    ];
+    for (var si = 0; si < steps.length; si++) {
+      (function (step) {
+        setTimeout(function () {
+          var bar = document.getElementById("fha-progress");
+          var stepEl = document.getElementById("fha-load-step");
+          var pctEl = document.getElementById("fha-load-pct");
+          if (bar) bar.style.width = step.pct + "%";
+          if (stepEl) stepEl.textContent = step.text;
+          if (pctEl) pctEl.textContent = step.pct + "%";
+        }, step.delay);
+      })(steps[si]);
+    }
+
+    /* Start the game */
+    startFleetCatcher();
+  }
+
+  function startFleetCatcher() {
+    var vehicles = ["\uD83D\uDE97", "\uD83D\uDE99", "\uD83D\uDEFB", "\uD83D\uDE8C", "\uD83C\uDFCE\uFE0F", "\uD83D\uDE9A"];
+    var activeCells = {};
+
+    function spawnVehicle() {
+      var grid = document.getElementById("fha-game-grid");
+      if (!grid) { clearInterval(gameTimer); return; }
+      var cells = grid.querySelectorAll(".fha-game-cell");
+      /* Find empty cells */
+      var empty = [];
+      for (var i = 0; i < cells.length; i++) {
+        if (!activeCells[i]) empty.push(i);
+      }
+      if (empty.length === 0) return;
+      var idx = empty[Math.floor(Math.random() * empty.length)];
+      var vehicle = vehicles[Math.floor(Math.random() * vehicles.length)];
+      var cell = cells[idx];
+      activeCells[idx] = true;
+      cell.textContent = vehicle;
+      cell.style.cssText = cell.style.cssText.replace(/background:[^;!]+!important/, "background:" + C.blueLight + " !important").replace(/border:[^;!]+!important/, "border:2px solid " + C.blue + " !important");
+      cell.style.transform = "scale(1.05)";
+
+      /* Click handler */
+      cell.onclick = (function (ci, cl) {
+        return function () {
+          gameScore++;
+          var scoreEl = document.getElementById("fha-game-score");
+          if (scoreEl) scoreEl.textContent = "\u2714 " + gameScore;
+          cl.textContent = "";
+          cl.style.cssText = cl.style.cssText.replace(/background:[^;!]+!important/, "background:" + C.bgSecondary + " !important").replace(/border:[^;!]+!important/, "border:2px solid " + C.borderLight + " !important");
+          cl.style.transform = "scale(1)";
+          cl.onclick = null;
+          delete activeCells[ci];
+          /* Flash green */
+          cl.style.cssText = cl.style.cssText.replace(/background:[^;!]+!important/, "background:rgba(34,197,94,0.15) !important");
+          setTimeout(function () {
+            cl.style.cssText = cl.style.cssText.replace(/background:[^;!]+!important/, "background:" + C.bgSecondary + " !important");
+          }, 200);
+          return false;
+        };
+      })(idx, cell);
+
+      /* Auto-disappear after random time */
+      var lifespan = 1200 + Math.floor(Math.random() * 1500);
+      setTimeout(function () {
+        if (activeCells[idx]) {
+          gameMisses++;
+          var missEl = document.getElementById("fha-game-miss");
+          if (missEl) missEl.textContent = "\u2716 " + gameMisses;
+          cell.textContent = "";
+          cell.style.cssText = cell.style.cssText.replace(/background:[^;!]+!important/, "background:" + C.bgSecondary + " !important").replace(/border:[^;!]+!important/, "border:2px solid " + C.borderLight + " !important");
+          cell.style.transform = "scale(1)";
+          cell.onclick = null;
+          delete activeCells[idx];
+          /* Flash red */
+          cell.style.cssText = cell.style.cssText.replace(/background:[^;!]+!important/, "background:rgba(239,68,68,0.1) !important");
+          setTimeout(function () {
+            cell.style.cssText = cell.style.cssText.replace(/background:[^;!]+!important/, "background:" + C.bgSecondary + " !important");
+          }, 200);
+        }
+      }, lifespan);
+    }
+
+    /* Spawn vehicles at increasing rate */
+    gameTimer = setInterval(function () {
+      spawnVehicle();
+    }, 900);
+    /* Spawn first one immediately */
+    setTimeout(spawnVehicle, 300);
+  }
+
+  /* ── Error state v5 ── */
+  function showError(msg) {
+    if (gameTimer) { clearInterval(gameTimer); gameTimer = null; }
+    var h = '<div style="padding:20px 24px !important;animation:fha-fadeIn 0.3s ease-out !important;">';
+    h += '<div style="display:flex !important;align-items:center !important;gap:10px !important;margin:0 0 24px 0 !important;">';
+    h += '<div style="width:36px !important;height:36px !important;border-radius:' + C.radiusMd + ' !important;background:' + C.blue + ' !important;display:flex !important;align-items:center !important;justify-content:center !important;">';
+    h += '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>';
+    h += '</div>';
+    h += '<div style="font-size:16px !important;font-weight:700 !important;color:' + C.textPrimary + ' !important;">Fleet Health Autopilot</div>';
+    h += '</div>';
+    h += '<div style="background:' + C.dangerBg + ' !important;border:1px solid ' + C.dangerBorder + ' !important;border-radius:' + C.radiusLg + ' !important;padding:32px !important;text-align:center !important;">';
+    h += '<div style="width:40px !important;height:40px !important;border-radius:50% !important;background:' + C.dangerGlow + ' !important;display:flex !important;align-items:center !important;justify-content:center !important;margin:0 auto 12px !important;">';
+    h += '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="' + C.danger + '" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>';
+    h += '</div>';
+    h += '<div style="font-size:14px !important;font-weight:600 !important;color:' + C.dangerDark + ' !important;margin:0 0 6px 0 !important;">Scan Failed</div>';
+    h += '<div style="font-size:12px !important;color:' + C.textSecondary + ' !important;margin:0 0 20px 0 !important;">' + esc(msg) + '</div>';
+    h += '<button id="fha-retry-btn" style="' + btnStyle("primary") + '">Retry</button>';
+    h += '<span style="display:inline-block !important;width:8px !important;"></span>';
+    h += '<button id="fha-back-btn" style="' + btnStyle("secondary") + '">Back</button>';
+    h += '</div></div>';
+    elApp.innerHTML = h;
+    var retry = document.getElementById("fha-retry-btn");
+    if (retry) retry.onclick = function () { triggerScan(false); return false; };
+    var back = document.getElementById("fha-back-btn");
+    if (back) back.onclick = function () { showIdle(); return false; };
+  }
+
+  /* ── Render results v5 ── */
+  /* ── Filter vehicles by active group ── */
+  /* ── Scan History Heatmap Timeline ── */
+  function buildHistoryTimeline(history) {
+    if (!history || history.length < 1) return "";
+    var h = '<div style="margin:8px 0 0 0 !important;background:' + C.bgMain + ' !important;border:1px solid ' + C.borderLight + ' !important;border-radius:' + C.radius + ' !important;overflow:hidden !important;">';
+    h += '<div style="display:flex !important;align-items:center !important;justify-content:space-between !important;padding:10px 16px 6px 16px !important;">';
+    h += '<div style="display:flex !important;align-items:center !important;gap:5px !important;">';
+    h += '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="' + C.blue + '" stroke-width="2" stroke-linecap="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>';
+    h += '<span style="font-size:11px !important;font-weight:600 !important;color:' + C.blue + ' !important;font-family:Roboto,\'Segoe UI\',sans-serif !important;">Fleet Health Timeline</span>';
+    h += '</div>';
+    h += '<span style="font-size:10px !important;color:' + C.textMuted + ' !important;">' + history.length + ' scans</span>';
+    h += '</div>';
+    /* Mini sparkline chart using inline SVG */
+    var pts = [];
+    var minScore = 100, maxScore = 0;
+    for (var i = 0; i < history.length; i++) {
+      var s = history[i].fleetScore || 0;
+      if (s < minScore) minScore = s;
+      if (s > maxScore) maxScore = s;
+    }
+    var range = Math.max(maxScore - minScore, 10);
+    var chartW = 320, chartH = 48, padY = 4;
+    for (var j = 0; j < history.length; j++) {
+      var x = history.length > 1 ? (j / (history.length - 1)) * chartW : chartW / 2;
+      var y = padY + (chartH - 2 * padY) - ((history[j].fleetScore - minScore) / range) * (chartH - 2 * padY);
+      pts.push(x.toFixed(1) + "," + y.toFixed(1));
+    }
+    var polyline = pts.join(" ");
+    /* Fill area */
+    var fillPts = "0," + chartH + " " + polyline + " " + chartW + "," + chartH;
+    /* Determine trend */
+    var latest = history[history.length - 1].fleetScore;
+    var prev = history.length > 1 ? history[history.length - 2].fleetScore : latest;
+    var trendColor = latest >= prev ? C.success : latest >= prev - 5 ? C.warn : C.danger;
+    var lineColor = latest >= 80 ? C.success : latest >= 60 ? C.warn : C.danger;
+    h += '<div style="padding:0 16px 6px 16px !important;overflow:hidden !important;">';
+    h += '<svg width="100%" height="' + chartH + '" viewBox="0 0 ' + chartW + ' ' + chartH + '" preserveAspectRatio="none" style="display:block !important;">';
+    h += '<defs><linearGradient id="fha-hg" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="' + lineColor + '" stop-opacity="0.15"/><stop offset="100%" stop-color="' + lineColor + '" stop-opacity="0.02"/></linearGradient></defs>';
+    h += '<polygon points="' + fillPts + '" fill="url(#fha-hg)" />';
+    h += '<polyline points="' + polyline + '" fill="none" stroke="' + lineColor + '" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />';
+    /* Latest point dot */
+    var lastPt = pts[pts.length - 1].split(",");
+    h += '<circle cx="' + lastPt[0] + '" cy="' + lastPt[1] + '" r="3" fill="' + lineColor + '" stroke="white" stroke-width="1.5" />';
+    h += '</svg></div>';
+    /* Heatmap grid: per-vehicle scores from most recent scan */
+    var latestScan = history[history.length - 1];
+    if (latestScan.vehicleScores && latestScan.vehicleScores.length > 0) {
+      var vs = latestScan.vehicleScores;
+      /* Sort worst-first */
+      vs.sort(function (a, b) { return (a.score || 0) - (b.score || 0); });
+      h += '<div style="padding:4px 16px 10px 16px !important;display:flex !important;flex-wrap:wrap !important;gap:3px !important;">';
+      for (var k = 0; k < vs.length && k < 50; k++) {
+        var vsc = vs[k].score || 0;
+        var cellColor;
+        if (vsc >= 90) cellColor = C.success;
+        else if (vsc >= 80) cellColor = "#4ade80";
+        else if (vsc >= 70) cellColor = C.warn;
+        else if (vsc >= 60) cellColor = "#fb923c";
+        else cellColor = C.danger;
+        h += '<div title="' + esc(vs[k].name) + ': ' + vsc + '/100" style="width:14px !important;height:14px !important;border-radius:2px !important;background:' + cellColor + ' !important;opacity:0.85 !important;cursor:default !important;"></div>';
+      }
+      if (vs.length > 50) h += '<span style="font-size:10px !important;color:' + C.textMuted + ' !important;align-self:center !important;margin:0 0 0 4px !important;">+' + (vs.length - 50) + '</span>';
+      h += '</div>';
+    }
+    /* Trend label */
+    var trendArrow = latest > prev ? "\u25B2" : latest < prev ? "\u25BC" : "\u25CF";
+    var trendLabel = latest > prev ? "Improving" : latest < prev ? "Declining" : "Stable";
+    h += '<div style="padding:6px 16px 10px 16px !important;display:flex !important;align-items:center !important;justify-content:space-between !important;border-top:1px solid ' + C.borderSubtle + ' !important;">';
+    h += '<span style="font-size:10px !important;color:' + trendColor + ' !important;font-weight:600 !important;">' + trendArrow + ' ' + trendLabel + ' (now ' + latest + '/100)</span>';
+    h += '<span style="font-size:10px !important;color:' + C.textMuted + ' !important;">Range: ' + minScore + '\u2013' + maxScore + '</span>';
+    h += '</div>';
+    h += '</div>';
+    return h;
+  }
+
+  /* ── Ask Your Fleet Chat ── */
+  function buildChatFAB() {
+    return '<div id="fha-chat-fab" style="position:fixed !important;bottom:20px !important;right:20px !important;z-index:1000 !important;cursor:pointer !important;"><div style="width:44px !important;height:44px !important;border-radius:50% !important;background:' + C.blue + ' !important;display:flex !important;align-items:center !important;justify-content:center !important;box-shadow:' + C.shadowMd + ' !important;">' +
+    '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" stroke-linecap="round"><path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/></svg>' +
+    '</div><div style="position:absolute !important;top:-4px !important;right:-2px !important;background:' + C.blue + ' !important;color:white !important;font-size:8px !important;font-weight:700 !important;padding:2px 5px !important;border-radius:' + C.radius + ' !important;letter-spacing:0.5px !important;">AI</div></div>';
+  }
+
+  function buildChatPanel() {
+    var h = '<div id="fha-chat-panel" style="display:none !important;position:fixed !important;bottom:80px !important;right:20px !important;width:480px !important;max-height:650px !important;z-index:1001 !important;background:' + C.bgMain + ' !important;border:1px solid ' + C.border + ' !important;border-radius:' + C.radiusLg + ' !important;box-shadow:' + C.shadowLg + ' !important;flex-direction:column !important;overflow:hidden !important;">';
+    /* Header */
+    h += '<div style="padding:12px 16px !important;background:' + C.blue + ' !important;display:flex !important;align-items:center !important;gap:8px !important;">';
+    h += '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" stroke-linecap="round"><path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/></svg>';
+    h += '<div><div style="font-size:13px !important;font-weight:600 !important;color:white !important;">Ask Your Fleet</div>';
+    h += '<div style="font-size:10px !important;color:rgba(255,255,255,0.7) !important;">AI-powered fleet queries</div></div>';
+    h += '<div style="flex:1 !important;"></div>';
+    h += '<button id="fha-chat-close" style="background:none !important;border:none !important;color:white !important;font-size:18px !important;cursor:pointer !important;padding:4px !important;opacity:0.8 !important;">&times;</button>';
+    h += '</div>';
+    /* Messages area */
+    h += '<div id="fha-chat-messages" style="flex:1 !important;overflow-y:auto !important;padding:12px !important;min-height:200px !important;max-height:340px !important;background:' + C.bgSecondary + ' !important;">';
+    /* Welcome message */
+    h += '<div style="margin:0 0 12px 0 !important;">';
+    h += '<div style="display:inline-block !important;max-width:85% !important;padding:10px 14px !important;background:' + C.bgMain + ' !important;border:1px solid ' + C.borderLight + ' !important;border-radius:12px 12px 12px 2px !important;font-size:12px !important;color:' + C.textPrimary + ' !important;line-height:1.5 !important;">';
+    h += 'Hi! I can answer questions about your fleet using live Geotab data. Try asking:<br>';
+    h += '<span style="color:' + C.blue + ' !important;font-style:italic !important;">"Which vehicles are currently driving?"</span><br>';
+    h += '<span style="color:' + C.blue + ' !important;font-style:italic !important;">"Show me vehicles with seatbelt violations"</span><br>';
+    h += '<span style="color:' + C.blue + ' !important;font-style:italic !important;">"What is the total distance driven today?"</span>';
+    h += '</div></div>';
+    h += '</div>';
+    /* Input area */
+    h += '<div style="padding:10px 12px !important;border-top:1px solid ' + C.borderLight + ' !important;display:flex !important;gap:8px !important;background:' + C.bgMain + ' !important;">';
+    h += '<input id="fha-chat-input" type="text" placeholder="Ask anything about your fleet\u2026" style="flex:1 !important;padding:9px 12px !important;border:1px solid ' + C.borderLight + ' !important;border-radius:20px !important;font-size:12px !important;color:' + C.textPrimary + ' !important;background:' + C.bgSecondary + ' !important;outline:none !important;" />';
+    h += '<button id="fha-chat-send" style="width:36px !important;height:36px !important;border-radius:50% !important;background:' + C.blue + ' !important;border:none !important;cursor:pointer !important;display:flex !important;align-items:center !important;justify-content:center !important;flex-shrink:0 !important;">';
+    h += '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2.5" stroke-linecap="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>';
+    h += '</button></div>';
+    h += '</div>';
+    return h;
+  }
+
+  function formatChatText(text) {
+    /* Basic markdown: **bold**, *italic*, \n→<br>, - list items */
+    var s = esc(text);
+    s = s.replace(/\*\*([^*]+)\*\*/g, '<strong style="color:inherit !important;">$1</strong>');
+    s = s.replace(/\*([^*]+)\*/g, '<em>$1</em>');
+    s = s.replace(/\n- /g, '<br>&bull; ');
+    s = s.replace(/\n/g, '<br>');
+    return s;
+  }
+
+  function sendCoachingCard(deviceName, vehicleIdx) {
+    var vehicles = lastData ? filterArchived(lastData.vehicles || []) : [];
+    var v = null;
+    for (var i = 0; i < vehicles.length; i++) {
+      if (vehicles[i].deviceName === deviceName) { v = vehicles[i]; break; }
+    }
+    if (!v || !v.driverCoaching) { alert("No coaching data available."); return; }
+    var dc = v.driverCoaching;
+    var subject = "Driver Coaching Report - " + deviceName + " - " + new Date().toLocaleDateString();
+    var body = "DRIVER COACHING REPORT\n";
+    body += "Vehicle: " + deviceName + "\n";
+    body += "Date: " + new Date().toLocaleDateString() + "\n";
+    body += "Health Score: " + (v.healthScore || "N/A") + "/100\n";
+    body += "Overall Rating: " + dc.rating + " - " + dc.ratingLabel + "\n\n";
+    body += "---\n\n";
+    body += dc.summary + "\n\n";
+    if (dc.positives && dc.positives.length > 0) {
+      body += "WHAT'S GOING WELL:\n";
+      for (var p = 0; p < dc.positives.length; p++) {
+        body += "  + " + dc.positives[p] + "\n";
+      }
+      body += "\n";
+    }
+    if (dc.improvements && dc.improvements.length > 0) {
+      body += "AREAS TO IMPROVE:\n";
+      for (var m = 0; m < dc.improvements.length; m++) {
+        var imp = dc.improvements[m];
+        body += "  " + imp.issue + ": " + imp.detail + "\n";
+        body += "    Tip: " + imp.tip + "\n\n";
+      }
+    }
+    if (dc.goalForNextWeek) {
+      body += "YOUR GOAL FOR NEXT WEEK:\n";
+      body += "  " + dc.goalForNextWeek + "\n\n";
+    }
+    body += "---\n";
+    body += "Sent from Fleet Health Autopilot by Beyond Clarity\n";
+
+    /* Show send modal with options */
+    showCoachingSendModal(deviceName, subject, body);
+  }
+  window.sendCoachingCard = sendCoachingCard;
+
+  function showCoachingSendModal(deviceName, subject, body) {
+    var existing = document.getElementById("fha-coach-modal");
+    if (existing) existing.parentNode.removeChild(existing);
+    var modal = document.createElement("div");
+    modal.id = "fha-coach-modal";
+    modal.style.cssText = "position:fixed !important;top:0 !important;left:0 !important;right:0 !important;bottom:0 !important;background:rgba(0,0,0,0.5) !important;display:flex !important;align-items:center !important;justify-content:center !important;z-index:100000 !important;animation:fha-fadeIn 0.2s ease-out !important;";
+    var card = document.createElement("div");
+    card.style.cssText = "background:" + C.bgMain + " !important;border-radius:" + C.radiusLg + " !important;padding:20px !important;max-width:360px !important;width:90% !important;box-shadow:" + C.shadowLg + " !important;animation:fha-slideDown 0.25s ease-out !important;";
+    var ch = '<div style="display:flex !important;align-items:center !important;justify-content:space-between !important;margin:0 0 14px 0 !important;">';
+    ch += '<div style="font-size:14px !important;font-weight:700 !important;color:' + C.textPrimary + ' !important;">Send Coaching Card</div>';
+    ch += '<button id="fha-coach-close" style="background:none !important;border:none !important;font-size:18px !important;color:' + C.textSecondary + ' !important;cursor:pointer !important;">&times;</button>';
+    ch += '</div>';
+    ch += '<div style="font-size:12px !important;color:' + C.textSecondary + ' !important;margin:0 0 14px 0 !important;">Send the coaching report for <strong style="color:' + C.textPrimary + ' !important;">' + esc(deviceName) + '</strong> to the driver.</div>';
+
+    /* Email input */
+    ch += '<div style="margin:0 0 10px 0 !important;">';
+    ch += '<label style="display:block !important;font-size:11px !important;font-weight:600 !important;color:' + C.textSecondary + ' !important;margin:0 0 4px 0 !important;">Driver email</label>';
+    ch += '<input id="fha-coach-email" type="email" placeholder="driver@company.com" style="width:100% !important;padding:8px 12px !important;border:1px solid ' + C.borderLight + ' !important;border-radius:' + C.radius + ' !important;font-size:12px !important;color:' + C.textPrimary + ' !important;background:' + C.bgMain + ' !important;outline:none !important;box-sizing:border-box !important;" />';
+    ch += '</div>';
+
+    /* Action buttons */
+    ch += '<div style="display:flex !important;flex-direction:column !important;gap:8px !important;">';
+    ch += '<button id="fha-coach-mailto" style="' + btnStyle("primary") + 'width:100% !important;padding:10px 16px !important;font-size:12px !important;font-weight:600 !important;display:flex !important;align-items:center !important;justify-content:center !important;gap:6px !important;">';
+    ch += '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg>';
+    ch += 'Open in Email App</button>';
+    ch += '<button id="fha-coach-copy" style="' + btnStyle("secondary") + 'width:100% !important;padding:10px 16px !important;font-size:12px !important;font-weight:600 !important;display:flex !important;align-items:center !important;justify-content:center !important;gap:6px !important;">';
+    ch += '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>';
+    ch += 'Copy to Clipboard</button>';
+    ch += '</div>';
+
+    card.innerHTML = ch;
+    modal.appendChild(card);
+    document.body.appendChild(modal);
+
+    /* Bind events */
+    modal.onclick = function (e) { if (e.target === modal) { modal.parentNode.removeChild(modal); } };
+    document.getElementById("fha-coach-close").onclick = function () { modal.parentNode.removeChild(modal); };
+    document.getElementById("fha-coach-mailto").onclick = function () {
+      var to = document.getElementById("fha-coach-email").value.trim();
+      var mailto = "mailto:" + encodeURIComponent(to) + "?subject=" + encodeURIComponent(subject) + "&body=" + encodeURIComponent(body);
+      window.open(mailto, "_blank");
+      modal.parentNode.removeChild(modal);
+    };
+    document.getElementById("fha-coach-copy").onclick = function () {
+      var fullText = subject + "\n\n" + body;
+      if (navigator.clipboard) {
+        navigator.clipboard.writeText(fullText).then(function () {
+          var btn = document.getElementById("fha-coach-copy");
+          if (btn) { btn.innerHTML = '\u2714 Copied!'; setTimeout(function () { modal.parentNode.removeChild(modal); }, 800); }
+        });
+      } else {
+        /* Fallback */
+        var ta = document.createElement("textarea");
+        ta.value = fullText;
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand("copy");
+        document.body.removeChild(ta);
+        var btn = document.getElementById("fha-coach-copy");
+        if (btn) { btn.innerHTML = '\u2714 Copied!'; setTimeout(function () { modal.parentNode.removeChild(modal); }, 800); }
+      }
+    };
+  }
+
+  function appendChatMessage(role, text, extras) {
+    chatMessages.push({ role: role, text: text, extras: extras || null, time: new Date() });
+    renderChatMessages();
+  }
+
+  function renderChatMessages() {
+    var container = document.getElementById("fha-chat-messages");
+    if (!container) return;
+    /* Keep the welcome message, append new messages */
+    var msgs = container.querySelectorAll(".fha-chat-msg");
+    for (var i = 0; i < msgs.length; i++) msgs[i].parentNode.removeChild(msgs[i]);
+
+    for (var j = 0; j < chatMessages.length; j++) {
+      var m = chatMessages[j];
+      var div = document.createElement("div");
+      div.className = "fha-chat-msg";
+      div.style.cssText = "margin:0 0 10px 0 !important;display:flex !important;justify-content:" + (m.role === "user" ? "flex-end" : "flex-start") + " !important;";
+
+      var bubble = document.createElement("div");
+      var isUser = m.role === "user";
+      bubble.style.cssText = "display:inline-block !important;max-width:85% !important;padding:10px 14px !important;border-radius:" + (isUser ? "12px 12px 2px 12px" : "12px 12px 12px 2px") + " !important;font-size:12px !important;line-height:1.55 !important;" +
+        (isUser
+          ? "background:" + C.blue + " !important;color:white !important;"
+          : "background:" + C.bgMain + " !important;color:" + C.textPrimary + " !important;border:1px solid " + C.borderLight + " !important;");
+      bubble.innerHTML = formatChatText(m.text);
+
+      /* Add highlights if present */
+      if (!isUser && m.extras && m.extras.highlights && m.extras.highlights.length > 0) {
+        var hlDiv = document.createElement("div");
+        hlDiv.style.cssText = "margin:8px 0 0 0 !important;padding:8px 0 0 0 !important;border-top:1px solid " + C.borderSubtle + " !important;";
+        for (var k = 0; k < m.extras.highlights.length; k++) {
+          var hl = document.createElement("div");
+          hl.style.cssText = "font-size:11px !important;color:" + C.blue + " !important;padding:2px 0 !important;";
+          hl.textContent = "\u2022 " + m.extras.highlights[k];
+          hlDiv.appendChild(hl);
+        }
+        bubble.appendChild(hlDiv);
+      }
+
+      /* Add follow-up suggestion */
+      if (!isUser && m.extras && m.extras.followUp) {
+        var fuDiv = document.createElement("div");
+        fuDiv.style.cssText = "margin:8px 0 0 0 !important;padding:8px 10px !important;background:" + C.blueGlow + " !important;border-radius:8px !important;font-size:11px !important;color:" + C.blue + " !important;cursor:pointer !important;word-wrap:break-word !important;overflow-wrap:break-word !important;line-height:1.4 !important;";
+        fuDiv.textContent = "\u21AA " + m.extras.followUp;
+        fuDiv.onclick = (function (q) {
+          return function () {
+            var cleaned = q.replace(/^\u21AA\s*/, "");
+            var inp = document.getElementById("fha-chat-input");
+            if (inp) { inp.value = cleaned; sendChatMessage(); }
+          };
+        })(m.extras.followUp);
+        bubble.appendChild(fuDiv);
+      }
+
+      div.appendChild(bubble);
+      container.appendChild(div);
+    }
+
+    /* Loading indicator */
+    if (isChatLoading) {
+      var ldiv = document.createElement("div");
+      ldiv.className = "fha-chat-msg";
+      ldiv.style.cssText = "margin:0 0 10px 0 !important;";
+      ldiv.innerHTML = '<div style="display:inline-block !important;padding:10px 14px !important;background:' + C.bgMain + ' !important;border:1px solid ' + C.borderLight + ' !important;border-radius:12px 12px 12px 2px !important;font-size:12px !important;color:' + C.textMuted + ' !important;"><span class="fha-typing">Querying fleet data</span></div>';
+      container.appendChild(ldiv);
+    }
+
+    container.scrollTop = container.scrollHeight;
+  }
+
+  function sendChatMessage() {
+    var input = document.getElementById("fha-chat-input");
+    if (!input || !input.value.trim() || isChatLoading) return;
+    var question = input.value.trim();
+    input.value = "";
+
+    appendChatMessage("user", question);
+    isChatLoading = true;
+    renderChatMessages();
+
+    if (!sessionCredentials) {
+      isChatLoading = false;
+      appendChatMessage("ai", "Session not ready. Please refresh the page.");
+      return;
+    }
+
+    /* Build vehicle context from last scan */
+    var vehicleContext = [];
+    if (lastData && lastData.vehicles) {
+      var ctxVehicles = filterArchived(lastData.vehicles);
+      for (var i = 0; i < ctxVehicles.length; i++) {
+        var v = ctxVehicles[i];
+        vehicleContext.push({
+          deviceId: v.deviceId, deviceName: v.deviceName,
+          healthScore: v.healthScore, status: v.status,
+          trips: v.trips, distKm: v.distKm,
+          lat: v.lat, lon: v.lon,
+          isDriving: v.isDriving, isComms: v.isComms,
+          exceptions: v.exceptions, faults: v.faults
+        });
+      }
+    }
+
+    var payload = {
+      question: question,
+      session: sessionCredentials,
+      database: currentDb,
+      vehicleContext: vehicleContext,
+      timezone: "Australia/Brisbane",
+      utcOffset: "+10:00",
+      currentTime: new Date().toISOString(),
+      currentLocalTime: (function () {
+        try { return new Date().toLocaleString("en-AU", { timeZone: "Australia/Brisbane", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false }); }
+        catch (e) { return new Date().toISOString(); }
+      })(),
+      scanTimestamp: (lastData && lastData.scannedAt) ? lastData.scannedAt : null
+    };
+
+    var xhr = new XMLHttpRequest();
+    xhr.open("POST", askWebhookBase, true);
+    xhr.setRequestHeader("Content-Type", "application/json");
+    xhr.timeout = 60000;
+    xhr.onload = function () {
+      isChatLoading = false;
+      if (xhr.status >= 200 && xhr.status < 300) {
+        try {
+          var resp = JSON.parse(xhr.responseText);
+          appendChatMessage("ai", resp.answer || "No answer received.", {
+            highlights: resp.highlights || [],
+            followUp: resp.followUp || "",
+            source: resp.source || ""
+          });
+        } catch (e) {
+          appendChatMessage("ai", "Received a response but couldn\u0027t parse it.");
+        }
+      } else {
+        appendChatMessage("ai", "Sorry, I couldn\u0027t reach the fleet query service (status " + xhr.status + "). Try again in a moment.");
+      }
+    };
+    xhr.onerror = function () {
+      isChatLoading = false;
+      appendChatMessage("ai", "Network error. Check that n8n is running.");
+    };
+    xhr.ontimeout = function () {
+      isChatLoading = false;
+      appendChatMessage("ai", "The query took too long. Try a simpler question.");
+    };
+    xhr.send(JSON.stringify(payload));
+  }
+
+  function bindChatEvents() {
+    var fab = document.getElementById("fha-chat-fab");
+    if (fab) fab.onclick = function () {
+      var panel = document.getElementById("fha-chat-panel");
+      if (!panel) return false;
+      var isHidden = panel.style.display === "none" || panel.style.display === "";
+      panel.style.cssText = isHidden ? "display:flex !important;flex-direction:column !important;position:fixed !important;bottom:80px !important;right:20px !important;width:480px !important;max-height:650px !important;z-index:1001 !important;background:" + C.bgMain + " !important;border:1px solid " + C.border + " !important;border-radius:" + C.radiusLg + " !important;box-shadow:" + C.shadowLg + " !important;overflow:hidden !important;" : "display:none !important;";
+      return false;
+    };
+    var closeBtn = document.getElementById("fha-chat-close");
+    if (closeBtn) closeBtn.onclick = function () {
+      var panel = document.getElementById("fha-chat-panel");
+      if (panel) panel.style.cssText = "display:none !important;";
+      return false;
+    };
+    var sendBtn = document.getElementById("fha-chat-send");
+    if (sendBtn) sendBtn.onclick = function () { sendChatMessage(); return false; };
+    var chatInput = document.getElementById("fha-chat-input");
+    if (chatInput) chatInput.onkeydown = function (e) {
+      if (e.keyCode === 13) { sendChatMessage(); return false; }
+    };
+  }
+
+  /* ── Fetch active (non-archived) device IDs from Geotab API ── */
+  function fetchActiveDevices(api) {
+    if (!api) return;
+    api.call("Get", {
+      typeName: "Device",
+      resultsLimit: 5000
+    }, function (devices) {
+      activeDeviceIds = {};
+      var now = new Date().toISOString();
+      var archivedCount = 0;
+      for (var i = 0; i < devices.length; i++) {
+        var dev = devices[i];
+        var aTo = dev.activeTo || "";
+        /* Device is archived if activeTo is a real past date (not a far-future placeholder) */
+        var isFarFuture = (aTo.indexOf("2050") !== -1 || aTo.indexOf("9999") !== -1 || aTo.indexOf("2049") !== -1 || aTo === "");
+        var isArchived = !isFarFuture && aTo !== "" && aTo < now;
+        if (!isArchived) {
+          activeDeviceIds[dev.id] = true;
+        } else {
+          archivedCount++;
+          console.log("[FHA] Archived device excluded: " + (dev.name || dev.id) + " (activeTo: " + aTo + ")");
+        }
+      }
+      var activeCount = 0;
+      for (var k in activeDeviceIds) { if (activeDeviceIds.hasOwnProperty(k)) activeCount++; }
+      console.log("[FHA] Devices: " + activeCount + " active, " + archivedCount + " archived (filtered out)");
+      /* Re-render if we already have data to apply the filter */
+      if (lastData) render(lastData);
+    }, function (err) {
+      console.warn("[FHA] Could not fetch active devices:", err);
+      /* On failure, set empty object so filter is at least active (shows nothing rather than everything) */
+      activeDeviceIds = null;
+    });
+  }
+
+  /* ── Filter out archived / suspended vehicles ── */
+  var ARCHIVED_KEYWORDS = ["archived", "suspended", "decommission", "disposed", "removed",
+    "retired", "sold", "written off", "wreck", "scrap", "stolen", "out of service"];
+  function filterArchived(vehicles) {
+    var filtered = [];
+    for (var i = 0; i < vehicles.length; i++) {
+      var v = vehicles[i];
+      /* Primary check: Geotab active device list (definitive source) */
+      if (activeDeviceIds && v.deviceId) {
+        if (!activeDeviceIds[v.deviceId]) continue;
+      }
+      /* Secondary check: keyword-based fallback for device name and group */
+      var nameLower = (v.deviceName || "").toLowerCase();
+      var groupLower = (v.groupName || "").toLowerCase();
+      var keywordMatch = false;
+      for (var k = 0; k < ARCHIVED_KEYWORDS.length; k++) {
+        if (nameLower.indexOf(ARCHIVED_KEYWORDS[k]) !== -1 || groupLower.indexOf(ARCHIVED_KEYWORDS[k]) !== -1) {
+          keywordMatch = true; break;
+        }
+      }
+      if (keywordMatch) continue;
+      filtered.push(v);
+    }
+    return filtered;
+  }
+
+  function filterByGroup(vehicles) {
+    if (!activeGroupFilter || activeGroupFilter.length === 0) return vehicles;
+    var filtered = [];
+    for (var i = 0; i < vehicles.length; i++) {
+      var vGroups = vehicles[i].groups || [];
+      for (var g = 0; g < activeGroupFilter.length; g++) {
+        if (vGroups.indexOf(activeGroupFilter[g]) !== -1) {
+          filtered.push(vehicles[i]);
+          break;
+        }
+      }
+    }
+    return filtered;
+  }
+
+  /* ── Dashboard Card wrapper ── */
+  function dashCard(title, iconSvg, content) {
+    var h = '<div style="background:' + C.bgMain + ' !important;border:1px solid ' + C.borderLight + ' !important;border-radius:' + C.radiusMd + ' !important;overflow:hidden !important;">';
+    h += '<div style="padding:12px 16px 8px 16px !important;display:flex !important;align-items:center !important;gap:6px !important;border-bottom:1px solid ' + C.borderSubtle + ' !important;">';
+    if (iconSvg) h += iconSvg;
+    h += '<span style="font-size:12px !important;font-weight:600 !important;color:' + C.textPrimary + ' !important;">' + esc(title) + '</span>';
+    h += '</div>';
+    h += content;
+    h += '</div>';
+    return h;
+  }
+
+  /* ── Big Fleet Health Timeline (expanded) ── */
+  function buildBigTimeline(history) {
+    if (!history || history.length < 1) return '<div style="padding:20px !important;text-align:center !important;color:' + C.textMuted + ' !important;font-size:12px !important;">Run a scan to see fleet health trend</div>';
+    var chartW = 600, chartH = 100, padX = 30, padY = 16;
+    var pts = [];
+    var minScore = 100, maxScore = 0;
+    for (var i = 0; i < history.length; i++) {
+      var s = history[i].fleetScore || 0;
+      if (s < minScore) minScore = s;
+      if (s > maxScore) maxScore = s;
+    }
+    /* Ensure nice range */
+    minScore = Math.max(0, minScore - 5);
+    maxScore = Math.min(100, maxScore + 5);
+    var range = Math.max(maxScore - minScore, 10);
+    for (var j = 0; j < history.length; j++) {
+      var x = history.length > 1 ? padX + (j / (history.length - 1)) * (chartW - 2 * padX) : chartW / 2;
+      var y = padY + (chartH - 2 * padY) - ((history[j].fleetScore - minScore) / range) * (chartH - 2 * padY);
+      pts.push(x.toFixed(1) + "," + y.toFixed(1));
+    }
+    var polyline = pts.join(" ");
+    var fillPts = padX + "," + (chartH - padY) + " " + polyline + " " + (chartW - padX) + "," + (chartH - padY);
+    var latest = history[history.length - 1].fleetScore;
+    var lineColor = latest >= 80 ? C.success : latest >= 60 ? C.warn : C.danger;
+    var h = '<div style="padding:8px 12px !important;">';
+    h += '<svg width="100%" height="' + chartH + '" viewBox="0 0 ' + chartW + ' ' + chartH + '" preserveAspectRatio="xMidYMid meet" style="display:block !important;">';
+    h += '<defs><linearGradient id="fha-big-hg" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="' + lineColor + '" stop-opacity="0.2"/><stop offset="100%" stop-color="' + lineColor + '" stop-opacity="0.02"/></linearGradient></defs>';
+    /* Y-axis labels */
+    h += '<text x="2" y="' + (padY + 4) + '" style="font-size:8px;fill:' + C.textMuted + ';">' + maxScore + '</text>';
+    h += '<text x="2" y="' + (chartH - padY + 4) + '" style="font-size:8px;fill:' + C.textMuted + ';">' + minScore + '</text>';
+    /* Grid lines */
+    h += '<line x1="' + padX + '" y1="' + padY + '" x2="' + (chartW - padX) + '" y2="' + padY + '" stroke="' + C.borderSubtle + '" stroke-width="0.5" stroke-dasharray="3,3"/>';
+    h += '<line x1="' + padX + '" y1="' + (chartH - padY) + '" x2="' + (chartW - padX) + '" y2="' + (chartH - padY) + '" stroke="' + C.borderSubtle + '" stroke-width="0.5" stroke-dasharray="3,3"/>';
+    h += '<polygon points="' + fillPts + '" fill="url(#fha-big-hg)" />';
+    h += '<polyline points="' + polyline + '" fill="none" stroke="' + lineColor + '" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" />';
+    /* Data points */
+    for (var k = 0; k < pts.length; k++) {
+      var pp = pts[k].split(",");
+      h += '<circle cx="' + pp[0] + '" cy="' + pp[1] + '" r="3.5" fill="' + lineColor + '" stroke="white" stroke-width="1.5" />';
+    }
+    h += '</svg>';
+    /* Summary row */
+    var prev = history.length > 1 ? history[history.length - 2].fleetScore : latest;
+    var trendArrow = latest > prev ? "\u25B2" : latest < prev ? "\u25BC" : "\u25CF";
+    var trendLabel = latest > prev ? "Improving" : latest < prev ? "Declining" : "Stable";
+    var trendColor = latest >= prev ? C.success : C.danger;
+    h += '<div style="display:flex !important;align-items:center !important;justify-content:space-between !important;padding:4px 0 0 0 !important;">';
+    h += '<span style="font-size:11px !important;color:' + trendColor + ' !important;font-weight:600 !important;">' + trendArrow + ' ' + trendLabel + ' \u2014 ' + latest + '/100</span>';
+    h += '<span style="font-size:10px !important;color:' + C.textMuted + ' !important;">' + history.length + ' scans</span>';
+    h += '</div></div>';
+    return h;
+  }
+
+  /* ── Score Distribution horizontal bars ── */
+  function buildScoreDistribution(vehicles) {
+    var buckets = [
+      { label: "90-100", min: 90, max: 100, color: C.success, count: 0 },
+      { label: "80-89", min: 80, max: 89, color: "#4ade80", count: 0 },
+      { label: "70-79", min: 70, max: 79, color: C.warn, count: 0 },
+      { label: "60-69", min: 60, max: 69, color: "#fb923c", count: 0 },
+      { label: "< 60", min: 0, max: 59, color: C.danger, count: 0 }
+    ];
+    var total = vehicles.length || 1;
+    for (var i = 0; i < vehicles.length; i++) {
+      var sc = vehicles[i].healthScore || 0;
+      for (var b = 0; b < buckets.length; b++) {
+        if (sc >= buckets[b].min && sc <= buckets[b].max) { buckets[b].count++; break; }
+      }
+    }
+    var maxCount = 1;
+    for (var m = 0; m < buckets.length; m++) { if (buckets[m].count > maxCount) maxCount = buckets[m].count; }
+    var h = '<div style="padding:10px 16px 14px 16px !important;">';
+    for (var j = 0; j < buckets.length; j++) {
+      var pct = Math.round((buckets[j].count / total) * 100);
+      var barW = Math.max(2, Math.round((buckets[j].count / maxCount) * 100));
+      h += '<div style="display:flex !important;align-items:center !important;gap:8px !important;margin:0 0 6px 0 !important;">';
+      h += '<span style="font-size:11px !important;color:' + C.textSecondary + ' !important;width:42px !important;text-align:right !important;flex-shrink:0 !important;">' + buckets[j].label + '</span>';
+      h += '<div style="flex:1 !important;height:18px !important;background:' + C.bgSecondary + ' !important;border-radius:3px !important;overflow:hidden !important;position:relative !important;">';
+      h += '<div style="height:100% !important;width:' + barW + '% !important;background:' + buckets[j].color + ' !important;border-radius:3px !important;transition:width 0.4s ease !important;"></div>';
+      h += '</div>';
+      h += '<span style="font-size:11px !important;font-weight:600 !important;color:' + C.textPrimary + ' !important;width:50px !important;flex-shrink:0 !important;">' + buckets[j].count + ' <span style="font-weight:400 !important;color:' + C.textMuted + ' !important;">(' + pct + '%)</span></span>';
+      h += '</div>';
+    }
+    h += '</div>';
+    return h;
+  }
+
+  /* ── Exception Counts by Rule ── */
+  function buildExceptionsByRule(vehicles) {
+    var rules = [
+      { key: "speeding", label: "Speeding", color: C.danger },
+      { key: "seatbelt", label: "Seatbelt", color: C.danger },
+      { key: "braking", label: "Harsh braking", color: C.warn },
+      { key: "cornering", label: "Harsh cornering", color: C.warn },
+      { key: "accel", label: "Harsh acceleration", color: C.warn },
+      { key: "engineLight", label: "Engine light", color: "#9333ea" },
+      { key: "engineFault", label: "Engine fault", color: "#9333ea" }
+    ];
+    var maxVal = 1;
+    for (var i = 0; i < rules.length; i++) {
+      rules[i].total = 0;
+      for (var j = 0; j < vehicles.length; j++) {
+        var ex = vehicles[j].exceptions || {};
+        rules[i].total += (ex[rules[i].key] || 0);
+      }
+      if (rules[i].total > maxVal) maxVal = rules[i].total;
+    }
+    /* Sort by count descending */
+    rules.sort(function (a, b) { return b.total - a.total; });
+    /* Filter out zero-count rules */
+    var active = [];
+    for (var f = 0; f < rules.length; f++) { if (rules[f].total > 0) active.push(rules[f]); }
+    if (active.length === 0) return '<div style="padding:16px !important;text-align:center !important;color:' + C.textMuted + ' !important;font-size:12px !important;">No exceptions detected</div>';
+    var h = '<div style="padding:10px 16px 14px 16px !important;">';
+    for (var k = 0; k < active.length; k++) {
+      var barW = Math.max(2, Math.round((active[k].total / maxVal) * 100));
+      h += '<div style="display:flex !important;align-items:center !important;gap:8px !important;margin:0 0 6px 0 !important;">';
+      h += '<span style="font-size:11px !important;color:' + C.textSecondary + ' !important;width:100px !important;text-align:right !important;flex-shrink:0 !important;">' + active[k].label + '</span>';
+      h += '<div style="flex:1 !important;height:18px !important;background:' + C.bgSecondary + ' !important;border-radius:3px !important;overflow:hidden !important;">';
+      h += '<div style="height:100% !important;width:' + barW + '% !important;background:' + active[k].color + ' !important;border-radius:3px !important;transition:width 0.4s ease !important;"></div>';
+      h += '</div>';
+      h += '<span style="font-size:12px !important;font-weight:600 !important;color:' + C.textPrimary + ' !important;width:36px !important;flex-shrink:0 !important;">' + active[k].total + '</span>';
+      h += '</div>';
+    }
+    h += '</div>';
+    return h;
+  }
+
+  /* ── Top 5 Worst Vehicles ── */
+  function buildWorstVehicles(vehicles) {
+    var sorted = vehicles.slice().sort(function (a, b) { return (a.healthScore || 0) - (b.healthScore || 0); });
+    var worst = sorted.slice(0, 5);
+    if (worst.length === 0) return '<div style="padding:16px !important;text-align:center !important;color:' + C.textMuted + ' !important;font-size:12px !important;">All vehicles healthy</div>';
+    var h = '<div style="padding:6px 0 !important;">';
+    for (var i = 0; i < worst.length; i++) {
+      var w = worst[i];
+      var sc = w.healthScore || 0;
+      var barColor = sc >= 80 ? C.success : sc >= 60 ? C.warn : C.danger;
+      h += '<div style="display:flex !important;align-items:center !important;gap:10px !important;padding:8px 16px !important;border-bottom:1px solid ' + C.borderSubtle + ' !important;">';
+      h += '<span style="font-size:11px !important;font-weight:700 !important;color:' + C.textMuted + ' !important;width:16px !important;">' + (i + 1) + '</span>';
+      h += '<div style="flex:1 !important;min-width:0 !important;">';
+      h += '<div style="font-size:12px !important;font-weight:500 !important;color:' + C.textPrimary + ' !important;white-space:nowrap !important;overflow:hidden !important;text-overflow:ellipsis !important;">' + esc(w.deviceName) + '</div>';
+      /* Micro bar */
+      h += '<div style="height:4px !important;background:' + C.bgSecondary + ' !important;border-radius:2px !important;margin:3px 0 0 0 !important;overflow:hidden !important;">';
+      h += '<div style="height:100% !important;width:' + sc + '% !important;background:' + barColor + ' !important;border-radius:2px !important;"></div></div>';
+      h += '</div>';
+      h += miniScore(sc);
+      h += '</div>';
+    }
+    h += '</div>';
+    return h;
+  }
+
+  /* ── Drill-down action card ── */
+  /* ── Predictive Risk Analysis ── */
+  function buildPredictiveRisk(vehicles) {
+    if (!vehicles || vehicles.length === 0) return '<div style="padding:16px !important;text-align:center !important;color:' + C.textMuted + ' !important;font-size:12px !important;">No vehicle data available</div>';
+
+    /* Calculate risk score per vehicle based on weighted exception patterns */
+    var riskVehicles = [];
+    for (var i = 0; i < vehicles.length; i++) {
+      var v = vehicles[i];
+      var ex = v.exceptions || {};
+      var f = v.faults || {};
+      /* Weighted risk factors — mechanical issues carry highest risk */
+      var mechRisk = ((ex.engineLight || 0) * 25) + ((ex.engineFault || 0) * 25) + ((f.critical || 0) * 30) + ((f.active || 0) * 20) + ((ex.collision || 0) * 40);
+      /* Driver behaviour risk — cumulative pattern indicates growing risk */
+      var driverRisk = ((ex.speeding || 0) * 8) + ((ex.seatbelt || 0) * 10) + ((ex.braking || 0) * 5) + ((ex.cornering || 0) * 5) + ((ex.accel || 0) * 4);
+      /* Total exceptions as volume indicator */
+      var totalExc = (ex.speeding || 0) + (ex.seatbelt || 0) + (ex.braking || 0) + (ex.cornering || 0) + (ex.accel || 0) + (ex.engineLight || 0) + (ex.engineFault || 0);
+      /* Health deficit — how far from perfect */
+      var healthDeficit = Math.max(0, 100 - (v.healthScore || 100));
+      /* Composite risk score (0-100) */
+      var riskScore = Math.min(100, Math.round(mechRisk + driverRisk + (healthDeficit * 0.5)));
+      /* Determine risk level and projected intervention */
+      var riskLevel, riskColor, riskBg, riskBorder, daysEstimate;
+      if (riskScore >= 60) {
+        riskLevel = "High"; riskColor = C.dangerDark; riskBg = C.dangerBg; riskBorder = C.dangerBorder;
+        daysEstimate = "1\u20133 days";
+      } else if (riskScore >= 30) {
+        riskLevel = "Medium"; riskColor = C.warnDark; riskBg = C.warnBg; riskBorder = C.warnBorder;
+        daysEstimate = "1\u20132 weeks";
+      } else if (riskScore > 0) {
+        riskLevel = "Low"; riskColor = C.blue; riskBg = C.blueLight; riskBorder = C.borderLight;
+        daysEstimate = "2\u20134 weeks";
+      } else {
+        riskLevel = "Minimal"; riskColor = C.successDark; riskBg = C.successBg; riskBorder = C.successBorder;
+        daysEstimate = "No action needed";
+      }
+      if (riskScore > 0) {
+        riskVehicles.push({
+          name: v.deviceName, score: riskScore, level: riskLevel,
+          color: riskColor, bg: riskBg, border: riskBorder,
+          days: daysEstimate, totalExc: totalExc, mechRisk: mechRisk,
+          driverRisk: driverRisk, healthScore: v.healthScore || 0
+        });
+      }
+    }
+    /* Sort highest risk first */
+    riskVehicles.sort(function (a, b) { return b.score - a.score; });
+
+    /* Fleet risk summary */
+    var highCount = 0, medCount = 0, lowCount = 0;
+    for (var r = 0; r < riskVehicles.length; r++) {
+      if (riskVehicles[r].level === "High") highCount++;
+      else if (riskVehicles[r].level === "Medium") medCount++;
+      else lowCount++;
+    }
+
+    var h = '<div style="padding:10px 16px 6px 16px !important;">';
+    /* Risk summary pills */
+    h += '<div style="display:flex !important;gap:8px !important;margin:0 0 10px 0 !important;">';
+    if (highCount > 0) {
+      h += '<div style="flex:1 !important;padding:8px 10px !important;background:' + C.dangerBg + ' !important;border:1px solid ' + C.dangerBorder + ' !important;border-radius:' + C.radius + ' !important;text-align:center !important;">';
+      h += '<div style="font-size:18px !important;font-weight:700 !important;color:' + C.dangerDark + ' !important;">' + highCount + '</div>';
+      h += '<div style="font-size:10px !important;color:' + C.dangerDark + ' !important;">High risk</div></div>';
+    }
+    if (medCount > 0) {
+      h += '<div style="flex:1 !important;padding:8px 10px !important;background:' + C.warnBg + ' !important;border:1px solid ' + C.warnBorder + ' !important;border-radius:' + C.radius + ' !important;text-align:center !important;">';
+      h += '<div style="font-size:18px !important;font-weight:700 !important;color:' + C.warnDark + ' !important;">' + medCount + '</div>';
+      h += '<div style="font-size:10px !important;color:' + C.warnDark + ' !important;">Medium risk</div></div>';
+    }
+    if (lowCount > 0) {
+      h += '<div style="flex:1 !important;padding:8px 10px !important;background:' + C.blueLight + ' !important;border:1px solid ' + C.borderLight + ' !important;border-radius:' + C.radius + ' !important;text-align:center !important;">';
+      h += '<div style="font-size:18px !important;font-weight:700 !important;color:' + C.blue + ' !important;">' + lowCount + '</div>';
+      h += '<div style="font-size:10px !important;color:' + C.blue + ' !important;">Low risk</div></div>';
+    }
+    if (riskVehicles.length === 0) {
+      h += '<div style="flex:1 !important;padding:8px 10px !important;background:' + C.successBg + ' !important;border:1px solid ' + C.successBorder + ' !important;border-radius:' + C.radius + ' !important;text-align:center !important;">';
+      h += '<div style="font-size:14px !important;font-weight:600 !important;color:' + C.successDark + ' !important;">All clear</div>';
+      h += '<div style="font-size:10px !important;color:' + C.successDark + ' !important;">No predicted interventions</div></div>';
+    }
+    h += '</div>';
+
+    /* Vehicle risk list (top 8) */
+    var showCount = Math.min(riskVehicles.length, 8);
+    for (var k = 0; k < showCount; k++) {
+      var rv = riskVehicles[k];
+      h += '<div style="display:flex !important;align-items:center !important;gap:8px !important;padding:7px 0 !important;border-bottom:1px solid ' + C.borderSubtle + ' !important;">';
+      /* Risk indicator dot */
+      h += '<div style="width:8px !important;height:8px !important;border-radius:50% !important;background:' + rv.color + ' !important;flex-shrink:0 !important;"></div>';
+      /* Vehicle name */
+      h += '<div style="flex:1 !important;min-width:0 !important;">';
+      h += '<div style="font-size:11px !important;font-weight:500 !important;color:' + C.textPrimary + ' !important;white-space:nowrap !important;overflow:hidden !important;text-overflow:ellipsis !important;">' + esc(rv.name) + '</div>';
+      h += '<div style="font-size:10px !important;color:' + C.textMuted + ' !important;">' + rv.totalExc + ' exceptions \u2022 Health ' + rv.healthScore + '/100</div>';
+      h += '</div>';
+      /* Risk level + ETA */
+      h += '<div style="text-align:right !important;flex-shrink:0 !important;">';
+      h += '<span style="display:inline-block !important;padding:2px 6px !important;border-radius:3px !important;background:' + rv.bg + ' !important;border:1px solid ' + rv.border + ' !important;font-size:10px !important;font-weight:600 !important;color:' + rv.color + ' !important;">' + rv.level + '</span>';
+      h += '<div style="font-size:9px !important;color:' + C.textMuted + ' !important;margin:2px 0 0 0 !important;">Est. ' + rv.days + '</div>';
+      h += '</div></div>';
+    }
+    if (riskVehicles.length > showCount) {
+      h += '<div style="font-size:10px !important;color:' + C.textMuted + ' !important;text-align:center !important;padding:6px 0 !important;">+' + (riskVehicles.length - showCount) + ' more vehicles with risk factors</div>';
+    }
+    h += '</div>';
+    return h;
+  }
+
+  function buildDrillCard(label, count, color, bgColor, borderColor, iconSvg, viewId) {
+    var h = '<div style="flex:1 !important;background:' + bgColor + ' !important;border:1px solid ' + borderColor + ' !important;border-radius:' + C.radiusMd + ' !important;padding:14px 16px !important;cursor:pointer !important;transition:box-shadow 0.15s !important;" onclick="window._fhaSetView(\'' + viewId + '\');return false;">';
+    h += '<div style="display:flex !important;align-items:center !important;justify-content:space-between !important;">';
+    h += '<div style="display:flex !important;align-items:center !important;gap:8px !important;">';
+    if (iconSvg) h += iconSvg;
+    h += '<div>';
+    h += '<div style="font-size:22px !important;font-weight:700 !important;color:' + color + ' !important;">' + count + '</div>';
+    h += '<div style="font-size:11px !important;color:' + color + ' !important;font-weight:500 !important;">' + esc(label) + '</div>';
+    h += '</div></div>';
+    h += '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="' + color + '" stroke-width="2" stroke-linecap="round"><polyline points="9 18 15 12 9 6"/></svg>';
+    h += '</div></div>';
+    return h;
+  }
+
+  function render(data) {
+    if (gameTimer) { clearInterval(gameTimer); gameTimer = null; }
+    var fleet = data.fleetSummary || {};
+    var allVehicles = filterArchived(data.vehicles || []);
+    var vehicles = filterByGroup(allVehicles);
+    var insight = data.fleetInsight || "";
+    /* Recalculate fleet stats for filtered set */
+    var filteredCount = vehicles.length;
+    var critCount = 0, warnCount = 0, healthCount = 0;
+    var scoreSum = 0;
+    for (var si = 0; si < vehicles.length; si++) {
+      scoreSum += (vehicles[si].healthScore || 0);
+      if (vehicles[si].status === "critical") critCount++;
+      else if (vehicles[si].status === "warning") warnCount++;
+      else healthCount++;
+    }
+    var score = filteredCount > 0 ? Math.round(scoreSum / filteredCount) : 100;
+    /* Build scanHistory entry from this scan */
+    var vehicleScoresArr = [];
+    for (var vh = 0; vh < vehicles.length; vh++) {
+      vehicleScoresArr.push({ name: vehicles[vh].deviceName || "", score: vehicles[vh].healthScore || 0 });
+    }
+    /* Only push if this looks like a fresh scan (not a re-render of old data) */
+    var scanTs = data.scannedAt || data.timestamp || new Date().toISOString();
+    var isDuplicate = scanHistory.length > 0 && scanHistory[scanHistory.length - 1].ts === scanTs;
+    if (!isDuplicate) {
+      scanHistory.push({ ts: scanTs, fleetScore: score, vehicleScores: vehicleScoresArr });
+      /* Cap at 50 entries */
+      if (scanHistory.length > 50) scanHistory.shift();
+    }
+    var mechV = [], driverV = [], healthyV = [];
+    for (var i = 0; i < vehicles.length; i++) {
+      var v = vehicles[i];
+      if (v.status === "healthy") healthyV.push(v);
+      else if (isMech(v)) mechV.push(v);
+      else driverV.push(v);
+    }
+    var allMechOk = (mechV.length === 0);
+
+    /* Sort flagged vehicles by score ascending (worst first) */
+    mechV.sort(function (a, b) { return (a.healthScore || 0) - (b.healthScore || 0); });
+    driverV.sort(function (a, b) { return (a.healthScore || 0) - (b.healthScore || 0); });
+    /* Sort healthy by score ascending so borderline vehicles show first */
+    healthyV.sort(function (a, b) { return (a.healthScore || 100) - (b.healthScore || 100); });
+
+    var h = '<div style="padding:16px 20px !important;font-family:Roboto,\'Segoe UI\',Segoe,\'Helvetica Neue\',Helvetica,sans-serif !important;">';
+
+    /* Clean Geotab-style header */
+    h += '<div style="position:sticky !important;top:0 !important;z-index:100 !important;background:' + C.bgMain + ' !important;border-bottom:1px solid ' + C.borderLight + ' !important;margin:0 -20px 12px -20px !important;padding:10px 20px !important;">';
+    h += '<div style="display:flex !important;align-items:center !important;gap:10px !important;">';
+    /* Left: clean title */
+    h += '<div style="min-width:0 !important;">';
+    h += '<div style="font-size:28px !important;font-weight:300 !important;color:' + C.textPrimary + ' !important;line-height:36px !important;">Fleet Health Autopilot</div>';
+    var headerSubtext = formatTime();
+    var activeLabel = getEffectiveGroupLabel();
+    if (activeLabel !== "All vehicles") headerSubtext += ' \u00B7 ' + activeLabel;
+    h += '<div style="font-size:11px !important;color:' + C.textMuted + ' !important;margin:2px 0 0 0 !important;">' + esc(headerSubtext) + '</div>';
+    h += '</div>';
+    /* Center: actions */
+    h += '<div style="display:flex !important;align-items:center !important;gap:6px !important;margin:0 0 0 12px !important;">';
+    h += '<button id="fha-refresh-btn" style="' + btnStyle("secondary") + 'font-size:11px !important;padding:5px 10px !important;">&#8635; Scan Again</button>';
+    h += '<button id="fha-riskmap-btn" style="' + btnStyle("secondary") + 'font-size:11px !important;padding:5px 10px !important;">';
+    h += '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:-1px !important;margin:0 3px 0 0 !important;"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6" opacity="0.5"/><circle cx="12" cy="12" r="2"/></svg>';
+    h += 'Risk Map</button>';
+    h += '</div>';
+    /* Right: spacer + email settings + gauge */
+    h += '<div style="flex:1 !important;"></div>';
+    h += '<button id="fha-settings-btn" style="' + btnStyle("secondary") + 'font-size:11px !important;padding:5px 10px !important;">Email Settings</button>';
+    h += '<div style="flex-shrink:0 !important;">' + buildGaugeSVG(score, 48) + '</div>';
+    h += '</div></div>';
+    h += '<div id="fha-settings-panel" style="display:none !important;">' + buildSettingsPanel() + '</div>';
+
+    /* Stats strip */
+    h += '<div style="display:flex !important;align-items:center !important;gap:16px !important;padding:8px 16px !important;background:' + C.bgMain + ' !important;border:1px solid ' + C.borderLight + ' !important;border-radius:' + C.radius + ' !important;margin:0 0 4px 0 !important;">';
+    var vehicleCountLabel = (activeGroupFilter.length > 0 && filteredCount < allVehicles.length)
+      ? (filteredCount + ' of ' + allVehicles.length)
+      : (filteredCount + '');
+    h += '<span style="font-size:12px !important;color:' + C.textSecondary + ' !important;"><strong style="color:' + C.textPrimary + ' !important;font-size:16px !important;">' + vehicleCountLabel + '</strong> <span style="font-size:11px !important;">vehicles</span></span>';
+    h += '<span style="width:1px !important;height:20px !important;background:' + C.borderLight + ' !important;"></span>';
+    if (allMechOk) {
+      h += '<span style="display:flex !important;align-items:center !important;gap:4px !important;font-size:12px !important;color:' + C.successDark + ' !important;font-weight:600 !important;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M22 11.08V12a10 10 0 11-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg> All healthy</span>';
+    } else {
+      h += '<span style="display:flex !important;align-items:center !important;gap:4px !important;font-size:12px !important;color:' + C.dangerDark + ' !important;font-weight:600 !important;">' + mechV.length + ' mechanical</span>';
+    }
+    if (driverV.length > 0) {
+      h += '<span style="width:1px !important;height:20px !important;background:' + C.borderLight + ' !important;"></span>';
+      h += '<span style="font-size:12px !important;color:' + C.warnDark + ' !important;font-weight:600 !important;">' + driverV.length + ' driver attention</span>';
+    }
+    h += '</div>';
+
+    /* ── VIEW BRANCHING ── */
+    if (currentView === "dashboard") {
+
+    /* Mechanical status banner (summary) */
+    if (allMechOk) {
+      h += '<div style="display:flex !important;gap:16px !important;padding:8px 16px !important;background:' + C.successBg + ' !important;border:1px solid ' + C.successBorder + ' !important;border-radius:' + C.radius + ' !important;margin:8px 0 4px 0 !important;">';
+      h += '<span style="font-size:11px !important;color:' + C.successDark + ' !important;font-weight:500 !important;">\u2713 No engine lights</span>';
+      h += '<span style="font-size:11px !important;color:' + C.successDark + ' !important;font-weight:500 !important;">\u2713 No active DTCs</span>';
+      h += '<span style="font-size:11px !important;color:' + C.successDark + ' !important;font-weight:500 !important;">\u2713 No battery alerts</span>';
+      h += '</div>';
+    } else {
+      h += '<div style="display:flex !important;align-items:center !important;gap:6px !important;padding:10px 16px !important;background:' + C.dangerBg + ' !important;border:1px solid ' + C.dangerBorder + ' !important;border-radius:' + C.radiusMd + ' !important;margin:8px 0 4px 0 !important;">';
+      h += '<span style="font-size:12px !important;color:' + C.dangerDark + ' !important;font-weight:600 !important;">' + mechV.length + ' vehicle' + (mechV.length !== 1 ? 's' : '') + ' with mechanical issues</span></div>';
+    }
+
+    /* AI Fleet Insight */
+    if (insight) {
+      h += '<div style="padding:10px 14px !important;background:' + C.blueLight + ' !important;border:1px solid ' + C.borderLight + ' !important;border-radius:' + C.radius + ' !important;margin:8px 0 0 0 !important;border-left:3px solid ' + C.blue + ' !important;">';
+      h += '<div style="display:flex !important;align-items:center !important;gap:5px !important;margin:0 0 4px 0 !important;">';
+      h += '<span style="font-size:11px !important;font-weight:600 !important;color:' + C.blue + ' !important;">Fleet Insight</span>';
+      h += '</div>';
+      h += '<div style="font-size:12px !important;line-height:1.6 !important;color:' + C.textPrimary + ' !important;">' + esc(insight) + '</div></div>';
+    }
+
+    /* ── Dashboard Charts Grid ── */
+    h += '<div style="display:grid !important;grid-template-columns:1fr 1fr !important;gap:8px !important;margin:8px 0 0 0 !important;">';
+
+    /* Fleet Health Trend (big) */
+    var trendIcon = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="' + C.blue + '" stroke-width="2" stroke-linecap="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>';
+    h += dashCard("Fleet health trend", trendIcon, buildBigTimeline(scanHistory));
+
+    /* Score Distribution */
+    var distIcon = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="' + C.blue + '" stroke-width="2" stroke-linecap="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>';
+    h += dashCard("Vehicle health distribution", distIcon, buildScoreDistribution(vehicles));
+
+    /* Exception Counts by Rule */
+    var excIcon = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="' + C.blue + '" stroke-width="2" stroke-linecap="round"><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>';
+    h += dashCard("Exceptions by rule", excIcon, buildExceptionsByRule(vehicles));
+
+    /* Top 5 Worst */
+    var worstIcon = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="' + C.blue + '" stroke-width="2" stroke-linecap="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>';
+    h += dashCard("Vehicles needing attention", worstIcon, buildWorstVehicles(vehicles));
+
+    h += '</div>';
+
+    /* ── Predictive Risk Analysis (full width) ── */
+    var riskIcon = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="' + C.blue + '" stroke-width="2" stroke-linecap="round"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>';
+    h += '<div style="margin:8px 0 0 0 !important;">';
+    h += dashCard("Predictive risk analysis", riskIcon, buildPredictiveRisk(vehicles));
+    h += '</div>';
+
+    /* ── Drill-Down Action Cards ── */
+    h += '<div style="display:flex !important;gap:8px !important;margin:10px 0 0 0 !important;">';
+    var mechIcon = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>';
+    h += buildDrillCard("Mechanical issues", mechV.length, C.dangerDark, C.dangerBg, C.dangerBorder, mechIcon, "mechanical");
+    var drvIcon = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 00-3-3.87"/><path d="M16 3.13a4 4 0 010 7.75"/></svg>';
+    h += buildDrillCard("Driver behaviour", driverV.length, C.warnDark, C.warnBg, C.warnBorder, drvIcon, "driver");
+    var okIcon = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M22 11.08V12a10 10 0 11-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>';
+    h += buildDrillCard("Healthy vehicles", healthyV.length, C.successDark, C.successBg, C.successBorder, okIcon, "healthy");
+    h += '</div>';
+
+    /* View All Exceptions link */
+    h += '<div style="text-align:center !important;padding:16px 0 8px 0 !important;">';
+    h += '<a href="' + gtAllExcLink() + '" target="_top" style="' + btnStyle("secondary") + '">View all exceptions in MyGeotab \u2192</a>';
+    h += '</div>';
+
+    } else {
+    /* ── DRILL-DOWN VIEWS (mechanical / driver / healthy) ── */
+
+    /* Back button */
+    h += '<div style="margin:8px 0 !important;">';
+    h += '<button id="fha-back-btn" style="' + btnStyle("secondary") + 'font-size:11px !important;padding:5px 12px !important;">';
+    h += '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="15 18 9 12 15 6"/></svg>';
+    var viewTitle = currentView === "mechanical" ? "Mechanical Issues" : currentView === "driver" ? "Driver Behaviour" : "Healthy Vehicles";
+    h += ' Back to Dashboard</button>';
+    h += '<span style="font-size:16px !important;font-weight:600 !important;color:' + C.textPrimary + ' !important;margin:0 0 0 12px !important;">' + esc(viewTitle) + '</span>';
+    h += '</div>';
+
+    /* Search filter */
+    h += '<div style="margin:8px 0 4px 0 !important;position:relative !important;">';
+    h += '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="' + C.textMuted + '" stroke-width="2" stroke-linecap="round" style="position:absolute !important;left:12px !important;top:50% !important;transform:translateY(-50%) !important;pointer-events:none !important;"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>';
+    h += '<input id="fha-search" type="text" placeholder="Search vehicles\u2026" style="width:100% !important;padding:8px 12px 8px 34px !important;border:1px solid ' + C.borderLight + ' !important;border-radius:' + C.radius + ' !important;font-size:12px !important;color:' + C.textPrimary + ' !important;background:' + C.bgMain + ' !important;outline:none !important;transition:border-color 0.15s !important;" />';
+    h += '</div>';
+
+    if (currentView === "mechanical") {
+      /* Mechanical Issues */
+      if (mechV.length > 0) {
+        h += sectionHead("Mechanical Issues", mechV.length, C.dangerDark, "", "mech", false);
+        h += '<div id="fha-sec-mech">';
+        for (var a = 0; a < mechV.length; a++) h += '<div class="fha-vcard" data-name="' + esc(mechV[a].deviceName).toLowerCase() + '">' + buildCard(mechV[a], a) + '</div>';
+        h += '</div>';
+      } else {
+        h += '<div style="padding:24px !important;text-align:center !important;color:' + C.successDark + ' !important;font-size:13px !important;font-weight:500 !important;">No mechanical issues detected</div>';
+      }
+    } else if (currentView === "driver") {
+      /* Driver Behaviour */
+      if (driverV.length > 0) {
+        h += sectionHead("Driver Behaviour", driverV.length, C.warnDark, "", "driver", false);
+        h += '<div id="fha-sec-driver">';
+        for (var b = 0; b < driverV.length; b++) h += '<div class="fha-vcard" data-name="' + esc(driverV[b].deviceName).toLowerCase() + '">' + buildCard(driverV[b], b) + '</div>';
+        h += '</div>';
+      }
+
+      /* Driver Coaching */
+      var coachVehicles = vehicles.slice().sort(function (a, b) {
+        var order = { F: 0, D: 1, C: 2, B: 3, A: 4 };
+        var ra = (a.driverCoaching || {}).rating || "A";
+        var rb = (b.driverCoaching || {}).rating || "A";
+        return (order[ra] || 4) - (order[rb] || 4);
+      });
+      var hasAnyCoaching = false;
+      for (var ci = 0; ci < coachVehicles.length; ci++) { if (coachVehicles[ci].driverCoaching) { hasAnyCoaching = true; break; } }
+      if (hasAnyCoaching) {
+        h += sectionHead("Driver Coaching", coachVehicles.length, C.blue, "", "coaching", (coachVehicles.length > 6));
+        h += '<div id="fha-sec-coaching" style="' + (coachVehicles.length > 6 ? 'display:none !important;' : '') + '">';
+        for (var ck = 0; ck < coachVehicles.length; ck++) {
+          var cv = coachVehicles[ck];
+          var cdc = cv.driverCoaching;
+          if (!cdc) continue;
+          var cGradeColors = { A: C.successDark, B: "#00695C", C: C.warnDark, D: "#E65100", F: C.dangerDark };
+          var cGradeBgs = { A: C.successBg, B: "#E0F2F1", C: C.warnBg, D: "#FFF3E0", F: C.dangerBg };
+          var cGc = cGradeColors[cdc.rating] || C.textMuted;
+          var cGb = cGradeBgs[cdc.rating] || C.bgSecondary;
+          h += '<div class="fha-vcard" data-name="' + esc(cv.deviceName).toLowerCase() + '" style="margin:0 0 8px 0 !important;background:' + C.bgMain + ' !important;border:1px solid ' + C.borderLight + ' !important;border-left:3px solid ' + cGc + ' !important;border-radius:' + C.radius + ' !important;padding:12px 14px !important;">';
+          h += '<div style="display:flex !important;align-items:center !important;gap:10px !important;margin:0 0 8px 0 !important;">';
+          h += '<div style="width:36px !important;height:36px !important;border-radius:50% !important;background:' + cGb + ' !important;border:2px solid ' + cGc + ' !important;display:flex !important;align-items:center !important;justify-content:center !important;flex-shrink:0 !important;">';
+          h += '<span style="font-size:16px !important;font-weight:800 !important;color:' + cGc + ' !important;">' + esc(cdc.rating) + '</span></div>';
+          h += '<div style="flex:1 !important;min-width:0 !important;">';
+          h += '<div style="font-size:13px !important;font-weight:600 !important;color:' + C.textPrimary + ' !important;">' + esc(cv.deviceName) + '</div>';
+          h += '<div style="font-size:11px !important;color:' + cGc + ' !important;font-weight:500 !important;">' + esc(cdc.ratingLabel) + ' \u2022 Score ' + (cv.healthScore || 100) + '/100</div>';
+          h += '</div>';
+          h += miniScore(cv.healthScore || 100);
+          h += '</div>';
+          h += '<div style="font-size:12px !important;color:' + C.textPrimary + ' !important;line-height:1.5 !important;margin:0 0 10px 0 !important;padding:8px 10px !important;background:' + C.bgSecondary + ' !important;border-radius:' + C.radius + ' !important;">' + esc(cdc.summary) + '</div>';
+          if (cdc.positives && cdc.positives.length > 0) {
+            h += '<div style="margin:0 0 8px 0 !important;">';
+            h += '<div style="font-size:10px !important;font-weight:600 !important;color:' + C.successDark + ' !important;margin:0 0 4px 0 !important;">Doing well</div>';
+            for (var cp = 0; cp < cdc.positives.length; cp++) {
+              h += '<div style="font-size:11px !important;color:' + C.textSecondary + ' !important;padding:2px 0 !important;line-height:1.3 !important;">\u2022 ' + esc(cdc.positives[cp]) + '</div>';
+            }
+            h += '</div>';
+          }
+          if (cdc.improvements && cdc.improvements.length > 0) {
+            h += '<div style="margin:0 0 8px 0 !important;">';
+            h += '<div style="font-size:10px !important;font-weight:600 !important;color:' + C.warnDark + ' !important;margin:0 0 4px 0 !important;">Improve</div>';
+            for (var cm = 0; cm < cdc.improvements.length; cm++) {
+              var cimp = cdc.improvements[cm];
+              h += '<div style="background:' + C.warnBg + ' !important;border-radius:4px !important;padding:6px 10px !important;margin:0 0 4px 0 !important;">';
+              h += '<div style="font-size:11px !important;font-weight:600 !important;color:' + C.textPrimary + ' !important;">' + esc(cimp.issue) + '</div>';
+              h += '<div style="font-size:10px !important;color:' + C.textSecondary + ' !important;line-height:1.3 !important;">' + esc(cimp.detail) + '</div>';
+              h += '<div style="font-size:10px !important;color:' + C.blue + ' !important;margin:2px 0 0 0 !important;font-weight:500 !important;">Tip: ' + esc(cimp.tip) + '</div>';
+              h += '</div>';
+            }
+            h += '</div>';
+          }
+          if (cdc.goalForNextWeek) {
+            h += '<div style="background:' + C.blueLight + ' !important;border-radius:' + C.radius + ' !important;padding:6px 10px !important;margin:0 0 10px 0 !important;border-left:3px solid ' + C.blue + ' !important;">';
+            h += '<span style="font-size:10px !important;font-weight:600 !important;color:' + C.blue + ' !important;">Goal: </span>';
+            h += '<span style="font-size:11px !important;color:' + C.textPrimary + ' !important;">' + esc(cdc.goalForNextWeek) + '</span>';
+            h += '</div>';
+          }
+          h += '<button onclick="sendCoachingCard(\'' + esc(cv.deviceName).replace(/'/g, "\\\\'") + '\',' + ck + ');return false;" style="' + btnStyle("secondary") + 'width:100% !important;padding:7px 12px !important;font-size:11px !important;display:flex !important;align-items:center !important;justify-content:center !important;gap:6px !important;">';
+          h += '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg>';
+          h += 'Send to Driver</button>';
+          h += '</div>';
+        }
+        h += '</div>';
+      }
+    } else if (currentView === "healthy") {
+      /* Healthy Vehicles Table */
+      if (healthyV.length > 0) {
+        h += '<div style="background:' + C.bgMain + ' !important;border:1px solid ' + C.borderLight + ' !important;border-radius:' + C.radiusMd + ' !important;overflow:hidden !important;margin:8px 0 0 0 !important;">';
+        h += '<table style="width:100% !important;border-collapse:collapse !important;">';
+        h += '<thead><tr style="background:' + C.bgSecondary + ' !important;">';
+        h += '<th style="padding:8px 14px !important;font-size:12px !important;color:' + C.textPrimary + ' !important;font-weight:700 !important;text-align:left !important;">Vehicle</th>';
+        h += '<th style="padding:8px 10px !important;font-size:12px !important;color:' + C.textPrimary + ' !important;font-weight:700 !important;text-align:center !important;">Score</th>';
+        h += '<th style="padding:8px 10px !important;font-size:12px !important;color:' + C.textPrimary + ' !important;font-weight:700 !important;text-align:center !important;">Trips</th>';
+        h += '<th style="padding:8px 14px !important;font-size:12px !important;color:' + C.textPrimary + ' !important;font-weight:700 !important;text-align:right !important;">Distance</th>';
+        h += '</tr></thead><tbody>';
+        for (var c = 0; c < healthyV.length; c++) {
+          var hv = healthyV[c];
+          h += '<tr class="fha-vrow" data-name="' + esc(hv.deviceName).toLowerCase() + '" style="border-top:1px solid ' + C.borderSubtle + ' !important;">';
+          h += '<td style="padding:8px 14px !important;font-size:12px !important;font-weight:500 !important;color:' + C.textPrimary + ' !important;">' + esc(hv.deviceName) + '</td>';
+          h += '<td style="padding:8px 10px !important;text-align:center !important;">' + miniScore(hv.healthScore || 100) + '</td>';
+          h += '<td style="padding:8px 10px !important;font-size:12px !important;color:' + C.textSecondary + ' !important;text-align:center !important;">' + (hv.trips || 0) + '</td>';
+          h += '<td style="padding:8px 14px !important;font-size:12px !important;color:' + C.textSecondary + ' !important;text-align:right !important;">' + (hv.distKm || 0) + ' km</td>';
+          h += '</tr>';
+        }
+        h += '</tbody></table></div>';
+      } else {
+        h += '<div style="padding:24px !important;text-align:center !important;color:' + C.textMuted + ' !important;font-size:13px !important;">No healthy vehicles in current filter</div>';
+      }
+    }
+
+    } /* end view branching */
+
+    /* Footer */
+    h += '<div style="text-align:center !important;padding:12px 0 0 0 !important;border-top:1px solid ' + C.borderSubtle + ' !important;margin:12px 0 0 0 !important;">';
+    h += '<span style="font-size:10px !important;color:' + C.border + ' !important;">Fleet Health Autopilot \u00B7 Beyond Clarity</span>';
+    h += '</div>';
+
+    /* Ask Your Fleet - Chat FAB + Panel */
+    h += buildChatFAB();
+    h += buildChatPanel();
+
+    h += '</div>';
+    elApp.innerHTML = h;
+    bindResults();
+  }
+
+  /* ── Bind result page ── */
+  /* ── View switching (exposed to window for onclick) ── */
+  window._fhaSetView = function (view) {
+    currentView = view || "dashboard";
+    if (lastData) render(lastData);
+  };
+
+  function bindResults() {
+    var rb = document.getElementById("fha-refresh-btn");
+    if (rb) rb.onclick = function () { triggerScan(false); return false; };
+    var rmb = document.getElementById("fha-riskmap-btn");
+    if (rmb) rmb.onclick = function () { showRiskMap(); return false; };
+    var bb = document.getElementById("fha-back-btn");
+    if (bb) bb.onclick = function () { window._fhaSetView("dashboard"); return false; };
+    bindSettingsToggle();
+    bindCollapseSections();
+    bindSearch();
+    bindChatEvents();
+  }
+
+  /* ── Collapsible section toggle ── */
+  function bindCollapseSections() {
+    var sections = ["mech", "driver", "healthy", "coaching"];
+    for (var i = 0; i < sections.length; i++) {
+      (function (sid) {
+        var header = document.getElementById("fha-sh-" + sid);
+        if (!header) return;
+        header.onclick = function () {
+          var content = document.getElementById("fha-sec-" + sid);
+          var chevron = document.getElementById("fha-chev-" + sid);
+          if (!content) return;
+          var isHidden = content.style.display === "none";
+          content.style.cssText = isHidden ? "display:block !important;" : "display:none !important;";
+          if (chevron) chevron.textContent = isHidden ? "\u25BC" : "\u25B6";
+          return false;
+        };
+      })(sections[i]);
+    }
+  }
+
+  /* ── Vehicle search filter ── */
+  function bindSearch() {
+    var input = document.getElementById("fha-search");
+    if (!input) return;
+    input.oninput = function () {
+      var q = (input.value || "").toLowerCase().trim();
+      /* Filter card-style vehicles */
+      var cards = document.querySelectorAll(".fha-vcard");
+      for (var i = 0; i < cards.length; i++) {
+        var name = cards[i].getAttribute("data-name") || "";
+        cards[i].style.cssText = (!q || name.indexOf(q) !== -1) ? "display:block !important;" : "display:none !important;";
+      }
+      /* Filter healthy table rows */
+      var rows = document.querySelectorAll(".fha-vrow");
+      for (var j = 0; j < rows.length; j++) {
+        var rn = rows[j].getAttribute("data-name") || "";
+        rows[j].style.cssText = (!q || rn.indexOf(q) !== -1) ? "display:table-row !important;border-top:1px solid " + C.borderSubtle + " !important;" : "display:none !important;";
+      }
+      /* If searching, expand all sections so results are visible */
+      if (q) {
+        var secs = ["mech", "driver", "healthy"];
+        for (var k = 0; k < secs.length; k++) {
+          var sec = document.getElementById("fha-sec-" + secs[k]);
+          var chev = document.getElementById("fha-chev-" + secs[k]);
+          if (sec) sec.style.cssText = "display:block !important;";
+          if (chev) chev.textContent = "\u25BC";
+        }
+      }
+    };
+  }
+
+  function bindSettingsToggle() {
+    var sb = document.getElementById("fha-settings-btn");
+    if (sb) sb.onclick = function () {
+      var p = document.getElementById("fha-settings-panel");
+      if (p) {
+        showSettingsFlag = !showSettingsFlag;
+        p.style.cssText = showSettingsFlag ? "display:block !important;" : "display:none !important;";
+        if (showSettingsFlag) bindSettingsEvents();
+      }
+      return false;
+    };
+  }
+
+  /* ── Recipient pill management ── */
+  function addRecipient(email) {
+    email = email.toLowerCase().trim();
+    for (var i = 0; i < emailConfig.additionalRecipients.length; i++) {
+      if (emailConfig.additionalRecipients[i] === email) return;
+    }
+    emailConfig.additionalRecipients.push(email);
+    renderRecipientPills();
+  }
+
+  function removeRecipient(email) {
+    var arr = [];
+    for (var i = 0; i < emailConfig.additionalRecipients.length; i++) {
+      if (emailConfig.additionalRecipients[i] !== email) arr.push(emailConfig.additionalRecipients[i]);
+    }
+    emailConfig.additionalRecipients = arr;
+    renderRecipientPills();
+  }
+
+  function renderRecipientPills() {
+    var container = document.getElementById("fha-recipients-list");
+    if (!container) return;
+    if (emailConfig.additionalRecipients.length === 0) {
+      container.innerHTML = '<div style="font-size:10px !important;color:' + C.textMuted + ' !important;padding:2px 0 !important;">No additional recipients added</div>';
+      return;
+    }
+    var h = '';
+    for (var i = 0; i < emailConfig.additionalRecipients.length; i++) {
+      var em = emailConfig.additionalRecipients[i];
+      /* Find display name from geotabUsers */
+      var displayLabel = em;
+      for (var j = 0; j < geotabUsers.length; j++) {
+        if (geotabUsers[j].email.toLowerCase() === em) {
+          var dn = geotabUsers[j].displayName.trim();
+          if (dn) displayLabel = dn;
+          break;
+        }
+      }
+      h += '<span class="fha-recip-pill" style="display:inline-flex !important;align-items:center !important;gap:4px !important;background:' + C.blueLight + ' !important;border:1px solid ' + C.blue + ' !important;border-radius:' + C.radiusFull + ' !important;padding:3px 8px 3px 10px !important;font-size:11px !important;color:' + C.blueDark + ' !important;margin:0 4px 4px 0 !important;font-weight:500 !important;">';
+      h += esc(displayLabel);
+      h += '<span data-remove-email="' + esc(em) + '" style="cursor:pointer !important;font-size:13px !important;font-weight:700 !important;color:' + C.blue + ' !important;line-height:1 !important;padding:0 2px !important;">&times;</span>';
+      h += '</span>';
+    }
+    container.innerHTML = h;
+    /* Bind remove buttons */
+    var pills = container.querySelectorAll("[data-remove-email]");
+    for (var k = 0; k < pills.length; k++) {
+      (function (el) {
+        el.onclick = function () {
+          removeRecipient(el.getAttribute("data-remove-email"));
+          return false;
+        };
+      })(pills[k]);
+    }
+  }
+
+  function bindSettingsEvents() {
+    var cl = document.getElementById("fha-close-set");
+    if (cl) cl.onclick = function () {
+      showSettingsFlag = false;
+      var p = document.getElementById("fha-settings-panel");
+      if (p) p.style.cssText = "display:none !important;";
+      return false;
+    };
+    var tw = document.getElementById("fha-toggle-wrap");
+    if (tw) tw.onclick = function () {
+      emailConfig.autoEmail = !emailConfig.autoEmail;
+      tw.style.background = emailConfig.autoEmail ? C.blue : C.border;
+      var dot = document.getElementById("fha-toggle-dot");
+      if (dot) dot.style.left = emailConfig.autoEmail ? "20px" : "2px";
+    };
+    /* Render existing additional recipients pills */
+    renderRecipientPills();
+    /* Add from Geotab user dropdown */
+    var addBtn = document.getElementById("fha-add-recip-btn");
+    if (addBtn) addBtn.onclick = function () {
+      var sel = document.getElementById("fha-add-recipient");
+      if (sel && sel.value) {
+        addRecipient(sel.value);
+        sel.value = "";
+      }
+      return false;
+    };
+    /* Add custom email */
+    var addCustBtn = document.getElementById("fha-add-custom-btn");
+    if (addCustBtn) addCustBtn.onclick = function () {
+      var inp = document.getElementById("fha-custom-email");
+      if (inp && inp.value && inp.value.indexOf("@") !== -1) {
+        addRecipient(inp.value.trim());
+        inp.value = "";
+      }
+      return false;
+    };
+    /* Save settings */
+    var sv = document.getElementById("fha-save-set");
+    if (sv) sv.onclick = function () {
+      var ri = document.getElementById("fha-cfg-recipient");
+      var hs = document.getElementById("fha-cfg-hour");
+      var msEl = document.getElementById("fha-cfg-min");
+      var grpSel = document.getElementById("fha-cfg-group");
+      if (ri) emailConfig.recipient = ri.value;
+      if (hs) emailConfig.scheduleHour = parseInt(hs.value, 10);
+      if (msEl) emailConfig.scheduleMin = parseInt(msEl.value, 10);
+      if (grpSel) {
+        emailConfig.reportGroupId = grpSel.value;
+        var selOpt = grpSel.options[grpSel.selectedIndex];
+        emailConfig.reportGroupName = selOpt ? (selOpt.getAttribute("data-group-name") || "") : "";
+      }
+      var whInput = document.getElementById("fha-cfg-webhook");
+      if (whInput && whInput.value.replace(/\s+/g, "")) {
+        emailConfig.webhookUrl = whInput.value.replace(/\s+/g, "");
+        webhookBase = emailConfig.webhookUrl;
+      }
+      saveConfig();
+      sv.textContent = "\u2713 Saved!";
+      sv.style.background = C.success;
+      sv.style.borderColor = C.success;
+      setTimeout(function () { sv.textContent = "Save Settings"; sv.style.background = C.blue; sv.style.borderColor = C.blue; }, 1500);
+      return false;
+    };
+    /* Send Report Now button */
+    var sm = document.getElementById("fha-send-me");
+    if (sm) sm.onclick = function () {
+      sendEmailTo(getAllRecipients());
+      return false;
+    };
+  }
+
+  /* ── Send email ── */
+  function sendEmailTo(email) {
+    var btn = document.getElementById("fha-send-me");
+    if (btn) { btn.textContent = "Sending\u2026"; btn.style.opacity = "0.6"; btn.style.cursor = "wait"; }
+    if (!sessionCredentials) return;
+    var recipients = email || getAllRecipients();
+    var payload = {
+      session: sessionCredentials,
+      database: currentDb,
+      forceEmail: true,
+      emailTo: recipients
+    };
+    var effectiveGroups = getEffectiveGroupIds();
+    if (effectiveGroups) {
+      payload.groupId = effectiveGroups;
+      payload.groupName = getEffectiveGroupLabel();
+    }
+    var xhr = new XMLHttpRequest();
+    xhr.open("POST", webhookBase, true);
+    xhr.setRequestHeader("Content-Type", "application/json");
+    xhr.setRequestHeader("Accept", "application/json");
+    xhr.timeout = 120000;
+    xhr.onload = function () {
+      var nb = document.getElementById("fha-send-me");
+      if (xhr.status >= 200 && xhr.status < 300) {
+        try { var data = JSON.parse(xhr.responseText); lastData = data; render(data); } catch (e) {}
+        if (nb) {
+          nb.textContent = "\u2713 Email Sent!";
+          nb.style.background = C.success; nb.style.borderColor = C.success; nb.style.opacity = "1";
+          setTimeout(function () { var b = document.getElementById("fha-send-me"); if (b) { b.textContent = "Send Report"; b.setAttribute("style", btnStyle("primary") + "font-size:11px !important;padding:5px 12px !important;white-space:nowrap !important;"); } }, 3000);
+        }
+      } else {
+        if (nb) { nb.textContent = "Failed"; nb.style.background = C.danger; nb.style.borderColor = C.danger; nb.style.opacity = "1";
+          setTimeout(function () { var b = document.getElementById("fha-send-me"); if (b) { b.textContent = "Send Report"; b.setAttribute("style", btnStyle("primary") + "font-size:11px !important;padding:5px 12px !important;white-space:nowrap !important;"); } }, 2000);
+        }
+      }
+    };
+    xhr.onerror = function () {
+      var nb = document.getElementById("fha-send-me");
+      if (nb) { nb.textContent = "Error"; nb.style.background = C.danger; nb.style.opacity = "1";
+        setTimeout(function () { var b = document.getElementById("fha-send-me"); if (b) { b.textContent = "Send Report"; b.setAttribute("style", btnStyle("primary") + "font-size:11px !important;padding:5px 12px !important;white-space:nowrap !important;"); } }, 2000);
+      }
+    };
+    xhr.send(JSON.stringify(payload));
+  }
+
+  /* ── Trigger scan ── */
+  function triggerScan(withEmail) {
+    if (isLoading) return;
+    if (!webhookBase) { showSetup(); return; }
+    if (!sessionCredentials) { showError("Session not ready. Please refresh the page."); return; }
+    isLoading = true;
+    showLoading();
+    /* Build POST payload with session credentials */
+    var payload = {
+      session: sessionCredentials,
+      database: currentDb
+    };
+    if (withEmail) {
+      payload.forceEmail = true;
+      payload.emailTo = getAllRecipients();
+      var effectiveGroups = getEffectiveGroupIds();
+      if (effectiveGroups) {
+        payload.groupId = effectiveGroups;
+        payload.groupName = getEffectiveGroupLabel();
+      }
+    }
+    var xhr = new XMLHttpRequest();
+    xhr.open("POST", webhookBase, true);
+    xhr.setRequestHeader("Content-Type", "application/json");
+    xhr.setRequestHeader("Accept", "application/json");
+    xhr.timeout = 120000;
+    xhr.onload = function () {
+      isLoading = false;
+      if (xhr.status >= 200 && xhr.status < 300) {
+        try { var data = JSON.parse(xhr.responseText); lastData = data; render(data); }
+        catch (e) { showError("Invalid response: " + e.message); }
+      } else { showError("Scanner returned status " + xhr.status); }
+    };
+    xhr.onerror = function () { isLoading = false; showError("Network error. Check n8n is running."); };
+    xhr.ontimeout = function () { isLoading = false; showError("Scan timed out after 120s."); };
+    xhr.send(JSON.stringify(payload));
+  }
+
+  /* ── Fetch Geotab users ── */
+  function fetchGeotabUsers(api) {
+    try {
+      api.call("Get", { typeName: "User" }, function (users) {
+        geotabUsers = [];
+        for (var i = 0; i < users.length; i++) {
+          var u = users[i];
+          if (u.name && u.name.indexOf("@") !== -1) {
+            geotabUsers.push({
+              email: u.name,
+              firstName: u.firstName || "",
+              lastName: u.lastName || "",
+              displayName: (u.firstName || "") + " " + (u.lastName || "")
+            });
+          }
+        }
+        /* Try to find current user's first name */
+        for (var j = 0; j < geotabUsers.length; j++) {
+          if (geotabUsers[j].email.toLowerCase() === currentUserEmail.toLowerCase()) {
+            currentFirstName = geotabUsers[j].firstName || currentUserName;
+            break;
+          }
+        }
+        /* Sort alphabetically by display name */
+        geotabUsers.sort(function (a, b) { return a.displayName.localeCompare(b.displayName); });
+      }, function () { /* API call failed, use fallback */ });
+    } catch (e) { /* Not a real Geotab API */ }
+  }
+
+  /* ── Fetch Geotab groups ── */
+  function fetchGeotabGroups(api) {
+    try {
+      api.call("Get", { typeName: "Group" }, function (groups) {
+        geotabGroups = [];
+        /* System group IDs to exclude */
+        var sysIds = {
+          "GroupCompanyId": true, "GroupRootId": true, "GroupNothingId": true,
+          "GroupSecurityId": true, "GroupPrivateUserId": true, "GroupDriveUserId": true,
+          "GroupDefectsId": true, "GroupTrailerId": true, "GroupAssetTypeId": true,
+          "GroupVehicleId": true, "GroupPersonalGroupId": true, "GroupEVBatteryHealthId": true
+        };
+        for (var i = 0; i < groups.length; i++) {
+          var g = groups[i];
+          var gid = g.id || "";
+          /* Skip system/root groups */
+          if (sysIds[gid]) continue;
+          /* Skip groups with no name or placeholder names */
+          if (!g.name || g.name === "**Org**") continue;
+          geotabGroups.push({
+            id: gid,
+            name: g.name || gid,
+            parentId: (g.parent && g.parent.id) ? g.parent.id : ""
+          });
+        }
+        /* Sort alphabetically */
+        geotabGroups.sort(function (a, b) { return a.name.localeCompare(b.name); });
+      }, function () { /* Group fetch failed */ });
+    } catch (e) { /* Not a real Geotab API */ }
+  }
+
+  /* ── Build all recipients for webhook ── */
+  function getAllRecipients() {
+    var primary = emailConfig.recipient || currentUserEmail;
+    var all = [primary];
+    for (var i = 0; i < emailConfig.additionalRecipients.length; i++) {
+      var em = emailConfig.additionalRecipients[i];
+      if (em && em !== primary) all.push(em);
+    }
+    return all.join(",");
+  }
+
+  /* ── Read MyGeotab global group filter from state ── */
+  function readGroupFilter(state) {
+    try {
+      var groups = state.getGroupFilter();
+      activeGroupFilter = [];
+      activeGroupNames = [];
+      groupFilterWasRead = true;
+      if (groups && groups.length > 0) {
+        for (var i = 0; i < groups.length; i++) {
+          var gid = (typeof groups[i] === "object") ? (groups[i].id || "") : (groups[i] || "");
+          if (gid && gid !== "GroupCompanyId") {
+            activeGroupFilter.push(gid);
+            /* Resolve name from fetched groups */
+            var name = gid;
+            for (var j = 0; j < geotabGroups.length; j++) {
+              if (geotabGroups[j].id === gid) { name = geotabGroups[j].name; break; }
+            }
+            activeGroupNames.push(name);
+          }
+        }
+      }
+    } catch (e) { /* state.getGroupFilter not available (standalone mode) */ }
+  }
+
+  /* ── Get effective group IDs for webhook ── */
+  function getEffectiveGroupIds() {
+    /* If MyGeotab filter was read: use it (even if empty = all vehicles) */
+    if (groupFilterWasRead) {
+      if (activeGroupFilter.length > 0) return activeGroupFilter.join(",");
+      return "";
+    }
+    /* Standalone mode: fall back to custom settings picker */
+    if (emailConfig.reportGroupId) return emailConfig.reportGroupId;
+    return "";
+  }
+
+  function getEffectiveGroupLabel() {
+    if (groupFilterWasRead) {
+      if (activeGroupNames.length > 0) return activeGroupNames.join(", ");
+      return "All vehicles";
+    }
+    if (emailConfig.reportGroupName) return emailConfig.reportGroupName;
+    return "All vehicles";
+  }
+
+  /* ── Risk Map ── */
+  function loadMapLibs(cb) {
+    if (mapLeafletLoaded) { cb(); return; }
+    var link = document.createElement("link");
+    link.rel = "stylesheet";
+    link.href = "https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css";
+    document.head.appendChild(link);
+    /* MarkerCluster CSS */
+    var mcCss = document.createElement("link");
+    mcCss.rel = "stylesheet";
+    mcCss.href = "https://cdnjs.cloudflare.com/ajax/libs/leaflet.markercluster/1.5.3/MarkerCluster.css";
+    document.head.appendChild(mcCss);
+    var mcCss2 = document.createElement("link");
+    mcCss2.rel = "stylesheet";
+    mcCss2.href = "https://cdnjs.cloudflare.com/ajax/libs/leaflet.markercluster/1.5.3/MarkerCluster.Default.css";
+    document.head.appendChild(mcCss2);
+    /* Custom cluster styles for Geotab Zenith */
+    var clStyle = document.createElement("style");
+    clStyle.textContent = '.fha-cluster{border-radius:50%;text-align:center;font-family:Roboto,sans-serif;font-weight:600;color:#fff;display:flex;align-items:center;justify-content:center;box-shadow:0 1px 4px rgba(0,0,0,0.25);border:2px solid rgba(255,255,255,0.8);}'
+      + '.fha-cluster-sm{background:#0078D3;width:32px;height:32px;font-size:11px;}'
+      + '.fha-cluster-md{background:#E65100;width:40px;height:40px;font-size:12px;}'
+      + '.fha-cluster-lg{background:#D32F2F;width:48px;height:48px;font-size:13px;}'
+      + '.fha-cluster-popup .leaflet-popup-content-wrapper{border-radius:4px;box-shadow:0 2px 8px rgba(0,0,0,0.18);}'
+      + '.fha-cluster-popup .leaflet-popup-content{margin:10px 12px;overflow-y:auto;}';
+    document.head.appendChild(clStyle);
+    var scr = document.createElement("script");
+    scr.src = "https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js";
+    scr.onload = function () {
+      var heat = document.createElement("script");
+      heat.src = "https://cdnjs.cloudflare.com/ajax/libs/leaflet.heat/0.2.0/leaflet-heat.js";
+      heat.onload = function () {
+        /* Load MarkerCluster plugin */
+        var mc = document.createElement("script");
+        mc.src = "https://cdnjs.cloudflare.com/ajax/libs/leaflet.markercluster/1.5.3/leaflet.markercluster.js";
+        mc.onload = function () { mapLeafletLoaded = true; cb(); };
+        mc.onerror = function () { mapLeafletLoaded = true; cb(); };
+        document.head.appendChild(mc);
+      };
+      heat.onerror = function () { cb(); };
+      document.head.appendChild(heat);
+    };
+    scr.onerror = function () { cb(); };
+    document.head.appendChild(scr);
+  }
+
+  function getMapDateRange() {
+    var now = new Date();
+    var from, to;
+    if (mapDateRange === "today") {
+      from = new Date(now.getFullYear(), now.getMonth(), now.getDate()); to = now;
+    } else if (mapDateRange === "week") {
+      to = now; from = new Date(to.getTime() - 7 * 86400000);
+    } else if (mapDateRange === "month") {
+      to = now; from = new Date(to.getTime() - 30 * 86400000);
+    } else {
+      var y = new Date(now.getTime() - 86400000);
+      from = new Date(y.getFullYear(), y.getMonth(), y.getDate());
+      to = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    }
+    return { from: from.toISOString(), to: to.toISOString() };
+  }
+
+  function fetchRules(cb) {
+    if (cachedRules) { cb(cachedRules); return; }
+    storedApi.call("Get", { typeName: "Rule", resultsLimit: 300 }, function (rules) {
+      cachedRules = rules || []; cb(cachedRules);
+    }, function () { cb([]); });
+  }
+
+  function fetchDeviceNames(deviceIds, cb) {
+    var missing = [];
+    for (var i = 0; i < deviceIds.length; i++) {
+      if (!cachedDeviceNames[deviceIds[i]]) missing.push(deviceIds[i]);
+    }
+    if (missing.length === 0) { cb(); return; }
+    var idx = 0;
+    function next() {
+      if (idx >= missing.length) { cb(); return; }
+      var did = missing[idx]; idx++;
+      storedApi.call("Get", { typeName: "Device", search: { id: did }, resultsLimit: 1 }, function (devs) {
+        if (devs && devs.length > 0) cachedDeviceNames[did] = devs[0].name || did;
+        else cachedDeviceNames[did] = did;
+        next();
+      }, function () { cachedDeviceNames[did] = did; next(); });
+    }
+    next();
+  }
+
+  function showRiskMap() {
+    mapViewActive = true;
+    mapActiveRules = [];
+    mapRuleLayers = {};
+    mapEnrichedPoints = [];
+    mapVehicleFilter = null;
+    mapRawEventCount = 0;
+    mapTruncated = false;
+    document.getElementById("fha-root").style.display = "none";
+    elMap.style.display = "block";
+    var f = "Roboto,'Segoe UI',Segoe,'Helvetica Neue',Helvetica,sans-serif";
+    var ss = function (s) { return 'style="' + s + '"'; };
+    var h = '<div style="padding:16px 20px;font-family:' + f + ';">';
+    /* Header */
+    h += '<div style="display:flex;align-items:center;gap:12px;border-bottom:1px solid ' + C.borderLight + ';padding:0 0 10px 0;margin:0 0 12px 0;">';
+    h += '<button id="fha-map-back" style="' + btnStyle("secondary") + 'font-size:11px !important;padding:5px 10px !important;">\u2190 Back</button>';
+    h += '<div style="font-size:28px;font-weight:300;color:' + C.textPrimary + ';line-height:36px;">Risk Map</div>';
+    h += '<div style="flex:1;"></div>';
+    h += '<select id="fha-map-range" style="padding:7px 12px;border:1px solid ' + C.borderLight + ';border-radius:' + C.radius + ';font-size:12px;color:' + C.textPrimary + ';background:' + C.bgMain + ';font-family:' + f + ';">';
+    h += '<option value="yesterday">Yesterday</option><option value="today">Today</option><option value="week">Last 7 days</option><option value="month">Last 30 days</option></select>';
+    h += '</div>';
+    /* Stats cards row */
+    h += '<div id="fha-map-cards" style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin:0 0 10px 0;">';
+    for (var ci = 0; ci < 4; ci++) {
+      h += '<div style="background:' + C.bgMain + ';border:1px solid ' + C.borderLight + ';border-radius:' + C.radius + ';padding:10px 12px;text-align:center;">';
+      var labels = ["Total Events","Vehicles","Peak Hour","Mapped Locations"];
+      h += '<div style="font-size:20px;font-weight:300;color:' + C.textPrimary + ';" id="fha-card-val-' + ci + '">--</div>';
+      h += '<div style="font-size:10px;color:' + C.textMuted + ';margin:2px 0 0 0;">' + labels[ci] + '</div></div>';
+    }
+    h += '</div>';
+    /* Main layout: sidebar + map */
+    h += '<div style="display:flex;gap:10px;">';
+    /* Left sidebar: rule selector + vehicle list */
+    h += '<div style="width:220px;flex-shrink:0;display:flex;flex-direction:column;gap:8px;">';
+    /* Rule multi-select */
+    h += '<div style="background:' + C.bgMain + ';border:1px solid ' + C.borderLight + ';border-radius:' + C.radius + ';padding:10px 12px;">';
+    h += '<div style="font-size:11px;font-weight:600;color:' + C.textPrimary + ';margin:0 0 6px 0;">Exception rules</div>';
+    h += '<select id="fha-map-rule-add" style="width:100%;padding:6px 8px;border:1px solid ' + C.borderLight + ';border-radius:' + C.radius + ';font-size:11px;color:' + C.textPrimary + ';background:' + C.bgMain + ';font-family:' + f + ';"><option value="">Loading\u2026</option></select>';
+    h += '<div id="fha-map-active-rules" style="margin:6px 0 0 0;"></div>';
+    h += '</div>';
+    /* Vehicle list */
+    h += '<div style="background:' + C.bgMain + ';border:1px solid ' + C.borderLight + ';border-radius:' + C.radius + ';flex:1;min-height:0;overflow:hidden;display:flex;flex-direction:column;">';
+    h += '<div style="font-size:11px;font-weight:600;color:' + C.textPrimary + ';padding:10px 12px 6px 12px;border-bottom:1px solid ' + C.borderLight + ';">Vehicles</div>';
+    h += '<div id="fha-map-vehicles" style="flex:1;overflow-y:auto;padding:4px 0;max-height:470px;"></div>';
+    h += '</div>';
+    h += '</div>';
+    /* Map area */
+    h += '<div style="flex:1;min-width:0;">';
+    h += '<div id="fha-map-wrap" style="position:relative;width:100%;height:650px;border:1px solid ' + C.borderLight + ';border-radius:' + C.radius + ';overflow:hidden;background:' + C.bgSecondary + ';">';
+    h += '<div id="fha-map-container" style="width:100%;height:100%;"></div>';
+    h += '<div id="fha-map-loading" style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);text-align:center;z-index:1000;">';
+    h += '<div style="width:28px;height:28px;border:3px solid ' + C.borderLight + ';border-top-color:' + C.blue + ';border-radius:50%;animation:fha-spin 0.8s linear infinite;margin:0 auto 8px auto;"></div>';
+    h += '<div style="font-size:12px;color:' + C.textSecondary + ';">Loading map\u2026</div></div>';
+    /* Legend */
+    h += '<div id="fha-map-legend" style="display:none;position:absolute;bottom:10px;right:10px;background:rgba(255,255,255,0.95);border:1px solid ' + C.borderLight + ';border-radius:' + C.radius + ';padding:8px 12px;z-index:1000;font-size:10px;color:' + C.textPrimary + ';">';
+    h += '<div style="font-weight:600;margin:0 0 4px 0;">Density</div>';
+    h += '<div style="display:flex;align-items:center;gap:4px;">';
+    h += '<span style="display:inline-block;width:50px;height:8px;border-radius:4px;background:linear-gradient(to right,#2196F3,#4CAF50,#FFC107,#FF9800,#F44336);"></span>';
+    h += '<span>Low</span><span style="margin:0 0 0 auto;">High</span></div></div>';
+    /* Fullscreen btn */
+    h += '<button id="fha-map-fullscreen" style="position:absolute;top:10px;right:10px;z-index:1000;background:rgba(255,255,255,0.9);border:1px solid ' + C.borderLight + ';border-radius:' + C.radius + ';padding:6px 8px;cursor:pointer;font-size:11px;color:' + C.textPrimary + ';">Expand</button>';
+    h += '</div>';
+    /* Status line */
+    h += '<div id="fha-map-stats" style="margin:6px 0 0 0;font-size:11px;color:' + C.textMuted + ';"></div>';
+    h += '</div></div></div>';
+    elMap.innerHTML = h;
+
+    /* Bind */
+    document.getElementById("fha-map-back").onclick = function () { hideRiskMap(); return false; };
+    document.getElementById("fha-map-range").onchange = function () {
+      mapDateRange = this.value; reloadAllRules();
+    };
+    var fsBtn = document.getElementById("fha-map-fullscreen");
+    if (fsBtn) fsBtn.onclick = function () {
+      var wrap = document.getElementById("fha-map-wrap");
+      if (!wrap) return;
+      var isFs = wrap.style.height === "calc(100vh - 80px)";
+      wrap.style.height = isFs ? "650px" : "calc(100vh - 80px)";
+      this.textContent = isFs ? "Expand" : "Collapse";
+      if (mapInstance) setTimeout(function () { mapInstance.invalidateSize(); }, 100);
+    };
+
+    loadMapLibs(function () {
+      if (!window.L) {
+        document.getElementById("fha-map-loading").innerHTML = '<div style="font-size:12px;color:' + C.dangerDark + ';">Could not load map library.</div>';
+        return;
+      }
+      initLeafletMap();
+      fetchRules(function (rules) { populateRuleSelector(rules); });
+    });
+  }
+
+  function hideRiskMap() {
+    mapViewActive = false;
+    elMap.style.display = "none";
+    document.getElementById("fha-root").style.display = "block";
+  }
+
+  function createClusterIcon(cluster) {
+    var count = cluster.getChildCount();
+    var size = "sm", px = 32;
+    if (count >= 100) { size = "lg"; px = 48; }
+    else if (count >= 20) { size = "md"; px = 40; }
+    return L.divIcon({
+      html: '<div class="fha-cluster fha-cluster-' + size + '">' + count + '</div>',
+      className: '',
+      iconSize: L.point(px, px)
+    });
+  }
+
+  function initLeafletMap() {
+    if (mapInstance) { try { mapInstance.remove(); } catch (e) {} mapInstance = null; }
+    var loadEl = document.getElementById("fha-map-loading");
+    if (loadEl) loadEl.style.display = "none";
+    mapInstance = L.map("fha-map-container", { center: [-27.47, 153.02], zoom: 10, zoomControl: true });
+    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+      attribution: "\u00A9 OpenStreetMap", maxZoom: 18
+    }).addTo(mapInstance);
+    if (window.L && L.markerClusterGroup) {
+      mapMarkersLayer = L.markerClusterGroup({
+        iconCreateFunction: createClusterIcon,
+        maxClusterRadius: 50,
+        spiderfyOnMaxZoom: false,
+        showCoverageOnHover: false,
+        zoomToBoundsOnClick: false,
+        disableClusteringAtZoom: 17
+      }).addTo(mapInstance);
+      mapMarkersLayer.on("clusterclick", function (ev) {
+        var cluster = ev.layer;
+        var markers = cluster.getAllChildMarkers();
+        var zoom = mapInstance.getZoom();
+        var maxZoom = mapInstance.getMaxZoom() || 18;
+        /* If not at max zoom and cluster has many children, zoom in first */
+        if (zoom < maxZoom - 2 && markers.length > 30) {
+          cluster.zoomToBounds({ padding: [40, 40] });
+          return;
+        }
+        /* Build vehicle × rule breakdown from marker data */
+        var vehs = {}, vehNames = {}, vehRuleIds = {};
+        for (var m = 0; m < markers.length; m++) {
+          var md = markers[m]._fhaData;
+          if (!md) continue;
+          if (!vehs[md.deviceId]) { vehs[md.deviceId] = {}; vehNames[md.deviceId] = md.deviceName; vehRuleIds[md.deviceId] = {}; }
+          var rn = md.ruleName || "Unknown";
+          vehs[md.deviceId][rn] = (vehs[md.deviceId][rn] || 0) + 1;
+          if (md.ruleId) vehRuleIds[md.deviceId][md.ruleId] = true;
+        }
+        /* Sort vehicles by total event count desc */
+        var vArr = [];
+        for (var vid in vehs) {
+          if (!vehs.hasOwnProperty(vid)) continue;
+          var total = 0, rules = vehs[vid];
+          for (var rk in rules) { if (rules.hasOwnProperty(rk)) total += rules[rk]; }
+          var vRids = [];
+          for (var rrid in vehRuleIds[vid]) { if (vehRuleIds[vid].hasOwnProperty(rrid)) vRids.push(rrid); }
+          vArr.push({ id: vid, name: vehNames[vid], rules: rules, ruleIds: vRids, total: total });
+        }
+        vArr.sort(function (a, b) { return b.total - a.total; });
+        /* Build popup HTML */
+        var maxShow = 8;
+        var html = '<div style="font-family:Roboto,sans-serif;min-width:220px;max-width:300px;">';
+        html += '<div style="font-size:13px;font-weight:600;color:#1F2833;margin:0 0 6px 0;border-bottom:1px solid #C0CCD8;padding:0 0 6px 0;">';
+        html += markers.length + ' exception' + (markers.length !== 1 ? 's' : '') + ' in this area</div>';
+        var shown = Math.min(vArr.length, maxShow);
+        for (var v = 0; v < shown; v++) {
+          var veh = vArr[v];
+          html += '<div style="padding:5px 0;' + (v < shown - 1 ? 'border-bottom:1px solid #E8ECF0;' : '') + '">';
+          html += '<div style="display:flex;align-items:center;gap:6px;margin:0 0 3px 0;">';
+          html += '<a href="' + gtExcLink(veh.id, veh.ruleIds) + '" target="_top" style="font-size:12px;font-weight:600;color:#0078D3;text-decoration:none;flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;" title="' + esc(veh.name) + '">' + esc(veh.name) + '</a>';
+          html += '<span style="font-size:11px;font-weight:600;color:#1F2833;flex-shrink:0;">' + veh.total + '</span>';
+          html += '</div>';
+          /* Rule breakdown */
+          var rArr = [];
+          for (var rr in veh.rules) { if (veh.rules.hasOwnProperty(rr)) rArr.push({ name: rr, count: veh.rules[rr] }); }
+          rArr.sort(function (a, b) { return b.count - a.count; });
+          for (var ri = 0; ri < rArr.length; ri++) {
+            /* Find rule color */
+            var rColor = "#556575";
+            for (var ac = 0; ac < mapActiveRules.length; ac++) {
+              if (mapActiveRules[ac].name === rArr[ri].name) { rColor = mapActiveRules[ac].color; break; }
+            }
+            html += '<div style="display:flex;align-items:center;gap:5px;padding:1px 0 1px 8px;font-size:11px;color:#556575;">';
+            html += '<span style="width:6px;height:6px;border-radius:50%;background:' + rColor + ';flex-shrink:0;"></span>';
+            html += '<span style="flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">' + esc(rArr[ri].name) + '</span>';
+            html += '<span style="flex-shrink:0;">' + rArr[ri].count + '</span>';
+            html += '</div>';
+          }
+          html += '</div>';
+        }
+        if (vArr.length > maxShow) {
+          html += '<div style="font-size:10px;color:#556575;padding:4px 0 0 0;text-align:center;">+ ' + (vArr.length - maxShow) + ' more vehicle' + ((vArr.length - maxShow) !== 1 ? 's' : '') + '</div>';
+        }
+        html += '</div>';
+        var latLng = cluster.getLatLng();
+        L.popup({ maxWidth: 320, maxHeight: 350, className: "fha-cluster-popup" })
+          .setLatLng(latLng)
+          .setContent(html)
+          .openOn(mapInstance);
+      });
+    } else {
+      mapMarkersLayer = L.layerGroup().addTo(mapInstance);
+    }
+  }
+
+  function populateRuleSelector(rules) {
+    var sel = document.getElementById("fha-map-rule-add");
+    if (!sel) return;
+    var sorted = [];
+    for (var i = 0; i < rules.length; i++) {
+      if (rules[i].name) sorted.push(rules[i]);
+    }
+    sorted.sort(function (a, b) {
+      var na = a.name.toLowerCase(), nb = b.name.toLowerCase();
+      return na < nb ? -1 : na > nb ? 1 : 0;
+    });
+    var h = '<option value="">+ Add rule layer\u2026</option>';
+    for (var j = 0; j < sorted.length; j++) {
+      h += '<option value="' + esc(sorted[j].id) + '" data-name="' + esc(sorted[j].name) + '">' + esc(sorted[j].name) + '</option>';
+    }
+    sel.innerHTML = h;
+    sel.onchange = function () {
+      if (!this.value) return;
+      var ruleId = this.value;
+      var ruleName = this.options[this.selectedIndex].getAttribute("data-name") || ruleId;
+      this.value = "";
+      /* Check if already added */
+      for (var k = 0; k < mapActiveRules.length; k++) {
+        if (mapActiveRules[k].id === ruleId) return;
+      }
+      var colorIdx = mapActiveRules.length % mapRuleColors.length;
+      mapActiveRules.push({ id: ruleId, name: ruleName, color: mapRuleColors[colorIdx], visible: true, rawCount: 0, truncated: false });
+      renderActiveRulesList();
+      loadRuleData(ruleId);
+    };
+  }
+
+  function renderActiveRulesList() {
+    var el = document.getElementById("fha-map-active-rules");
+    if (!el) return;
+    if (mapActiveRules.length === 0) { el.innerHTML = '<div style="font-size:10px;color:' + C.textMuted + ';padding:4px 0;">No rules selected</div>'; return; }
+    var h = '';
+    for (var i = 0; i < mapActiveRules.length; i++) {
+      var r = mapActiveRules[i];
+      h += '<div style="display:flex;align-items:center;gap:6px;padding:3px 0;font-size:11px;" data-ridx="' + i + '">';
+      h += '<span style="width:10px;height:10px;border-radius:50%;background:' + r.color + ';flex-shrink:0;opacity:' + (r.visible ? '1' : '0.3') + ';cursor:pointer;" class="fha-rule-toggle"></span>';
+      h += '<span style="flex:1;color:' + (r.visible ? C.textPrimary : C.textMuted) + ';white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:pointer;" class="fha-rule-toggle" title="' + esc(r.name) + '">' + esc(r.name) + '</span>';
+      h += '<span style="color:' + C.textMuted + ';cursor:pointer;font-size:14px;line-height:1;" class="fha-rule-remove">\u00D7</span>';
+      h += '</div>';
+    }
+    el.innerHTML = h;
+    /* Bind toggle/remove */
+    var toggles = el.querySelectorAll(".fha-rule-toggle");
+    for (var t = 0; t < toggles.length; t++) {
+      toggles[t].onclick = function () {
+        var idx = parseInt(this.parentNode.getAttribute("data-ridx"));
+        if (isNaN(idx) || !mapActiveRules[idx]) return;
+        mapActiveRules[idx].visible = !mapActiveRules[idx].visible;
+        renderActiveRulesList();
+        rebuildMapLayers();
+      };
+    }
+    var removes = el.querySelectorAll(".fha-rule-remove");
+    for (var r = 0; r < removes.length; r++) {
+      removes[r].onclick = function () {
+        var idx = parseInt(this.parentNode.getAttribute("data-ridx"));
+        if (isNaN(idx)) return;
+        var rid = mapActiveRules[idx].id;
+        mapActiveRules.splice(idx, 1);
+        /* Recalculate raw event count and truncation */
+        mapRawEventCount = 0;
+        mapTruncated = false;
+        for (var rc = 0; rc < mapActiveRules.length; rc++) {
+          mapRawEventCount = mapRawEventCount + (mapActiveRules[rc].rawCount || 0);
+          if (mapActiveRules[rc].truncated) mapTruncated = true;
+        }
+        /* Remove enriched points for this rule */
+        var kept = [];
+        for (var p = 0; p < mapEnrichedPoints.length; p++) {
+          if (mapEnrichedPoints[p].ruleId !== rid) kept.push(mapEnrichedPoints[p]);
+        }
+        mapEnrichedPoints = kept;
+        renderActiveRulesList();
+        rebuildMapLayers();
+        updateStatsCards();
+        updateVehiclePanel();
+      };
+    }
+  }
+
+  function reloadAllRules() {
+    mapEnrichedPoints = [];
+    mapRawEventCount = 0;
+    mapTruncated = false;
+    for (var i = 0; i < mapActiveRules.length; i++) {
+      loadRuleData(mapActiveRules[i].id);
+    }
+    if (mapActiveRules.length === 0) {
+      rebuildMapLayers(); updateStatsCards(); updateVehiclePanel();
+    }
+  }
+
+  function loadRuleData(ruleId) {
+    var statsEl = document.getElementById("fha-map-stats");
+    if (statsEl) statsEl.innerHTML = '<span style="color:' + C.blue + ';">Loading events\u2026</span>';
+    /* Remove old points for this rule */
+    var kept = [];
+    for (var x = 0; x < mapEnrichedPoints.length; x++) {
+      if (mapEnrichedPoints[x].ruleId !== ruleId) kept.push(mapEnrichedPoints[x]);
+    }
+    mapEnrichedPoints = kept;
+    var range = getMapDateRange();
+    var ruleObj = null;
+    for (var ri = 0; ri < mapActiveRules.length; ri++) {
+      if (mapActiveRules[ri].id === ruleId) { ruleObj = mapActiveRules[ri]; break; }
+    }
+    if (!ruleObj) return;
+    var evtLimit = 10000;
+    storedApi.call("Get", {
+      typeName: "ExceptionEvent",
+      search: { ruleSearch: { id: ruleId }, fromDate: range.from, toDate: range.to },
+      resultsLimit: evtLimit
+    }, function (events) {
+      if (!events || events.length === 0) {
+        ruleObj.rawCount = 0;
+        ruleObj.truncated = false;
+        mapRawEventCount = 0;
+        mapTruncated = false;
+        for (var zz = 0; zz < mapActiveRules.length; zz++) {
+          mapRawEventCount = mapRawEventCount + (mapActiveRules[zz].rawCount || 0);
+          if (mapActiveRules[zz].truncated) mapTruncated = true;
+        }
+        if (statsEl) statsEl.innerHTML = "No events for " + esc(ruleObj.name) + " in this period.";
+        rebuildMapLayers(); updateStatsCards(); updateVehiclePanel();
+        return;
+      }
+      /* Track raw counts and truncation */
+      ruleObj.rawCount = events.length;
+      ruleObj.truncated = (events.length >= evtLimit);
+      mapRawEventCount = 0;
+      mapTruncated = false;
+      for (var rc = 0; rc < mapActiveRules.length; rc++) {
+        mapRawEventCount = mapRawEventCount + (mapActiveRules[rc].rawCount || 0);
+        if (mapActiveRules[rc].truncated) mapTruncated = true;
+      }
+      if (statsEl) statsEl.innerHTML = '<span style="color:' + C.blue + ';">' + events.length + ' events. Fetching GPS\u2026</span>';
+      var devMap = {}, devList = [];
+      for (var i = 0; i < events.length; i++) {
+        var did = events[i].device ? events[i].device.id : null;
+        if (!did) continue;
+        /* Skip archived devices */
+        if (activeDeviceIds && !activeDeviceIds[did]) continue;
+        if (!devMap[did]) { devMap[did] = []; devList.push(did); }
+        devMap[did].push(events[i]);
+      }
+      fetchDeviceNames(devList, function () {
+        fetchLogsForDevices(devList, range.from, range.to, function (logsByDev) {
+          for (var d = 0; d < devList.length; d++) {
+            var id = devList[d];
+            var devEvts = devMap[id];
+            var logs = logsByDev[id] || [];
+            if (logs.length === 0) continue;
+            logs.sort(function (a, b) { return new Date(a.dateTime).getTime() - new Date(b.dateTime).getTime(); });
+            for (var e = 0; e < devEvts.length; e++) {
+              var evTime = new Date(devEvts[e].activeFrom).getTime();
+              var nr = findNearestLog(logs, evTime);
+              if (nr && nr.latitude && nr.longitude && nr.latitude !== 0 && nr.longitude !== 0) {
+                mapEnrichedPoints.push({
+                  lat: nr.latitude, lng: nr.longitude,
+                  deviceId: id, deviceName: cachedDeviceNames[id] || id,
+                  dateTime: devEvts[e].activeFrom,
+                  ruleId: ruleId, ruleName: ruleObj.name, color: ruleObj.color
+                });
+              }
+            }
+          }
+          rebuildMapLayers();
+          updateStatsCards();
+          updateVehiclePanel();
+          if (statsEl) {
+            var total = mapEnrichedPoints.length;
+            var msg = mapRawEventCount + ' events found, ' + total + ' mapped across ' + mapActiveRules.length + ' rule' + (mapActiveRules.length > 1 ? 's' : '');
+            if (mapTruncated) msg += ' <span style="color:' + C.dangerDark + ';">(results capped \u2014 narrow date range for complete data)</span>';
+            statsEl.innerHTML = msg;
+          }
+        });
+      });
+    }, function () {
+      if (statsEl) statsEl.innerHTML = '<span style="color:' + C.dangerDark + ';">Error loading events.</span>';
+    });
+  }
+
+  function fetchLogsForDevices(deviceIds, fromDate, toDate, cb) {
+    var results = {}, idx = 0;
+    var statsEl = document.getElementById("fha-map-stats");
+    function next() {
+      if (idx >= deviceIds.length) { cb(results); return; }
+      var did = deviceIds[idx]; idx++;
+      if (statsEl) statsEl.innerHTML = '<span style="color:' + C.blue + ';">GPS ' + idx + '/' + deviceIds.length + '</span>';
+      var logLimit = 500;
+      if (mapDateRange === "week") logLimit = 1000;
+      else if (mapDateRange === "month") logLimit = 2000;
+      storedApi.call("Get", {
+        typeName: "LogRecord",
+        search: { deviceSearch: { id: did }, fromDate: fromDate, toDate: toDate },
+        resultsLimit: logLimit
+      }, function (recs) { results[did] = recs; next(); }, function () { results[did] = []; next(); });
+    }
+    next();
+  }
+
+  function findNearestLog(logs, target) {
+    if (logs.length === 0) return null;
+    var lo = 0, hi = logs.length - 1;
+    while (lo < hi) {
+      var mid = Math.floor((lo + hi) / 2);
+      if (new Date(logs[mid].dateTime).getTime() < target) lo = mid + 1; else hi = mid;
+    }
+    var best = logs[lo];
+    if (lo > 0) {
+      var d1 = Math.abs(new Date(logs[lo].dateTime).getTime() - target);
+      var d2 = Math.abs(new Date(logs[lo - 1].dateTime).getTime() - target);
+      if (d2 < d1) best = logs[lo - 1];
+    }
+    return best;
+  }
+
+  function getFilteredPoints() {
+    var pts = [];
+    for (var i = 0; i < mapEnrichedPoints.length; i++) {
+      var p = mapEnrichedPoints[i];
+      /* Check rule visible */
+      var rVis = false;
+      for (var r = 0; r < mapActiveRules.length; r++) {
+        if (mapActiveRules[r].id === p.ruleId && mapActiveRules[r].visible) { rVis = true; break; }
+      }
+      if (!rVis) continue;
+      if (mapVehicleFilter && p.deviceId !== mapVehicleFilter) continue;
+      pts.push(p);
+    }
+    return pts;
+  }
+
+  function rebuildMapLayers() {
+    if (!mapInstance || !window.L) return;
+    if (heatLayerInstance) { mapInstance.removeLayer(heatLayerInstance); heatLayerInstance = null; }
+    if (mapMarkersLayer) mapMarkersLayer.clearLayers();
+    var legendEl = document.getElementById("fha-map-legend");
+    var pts = getFilteredPoints();
+    if (pts.length === 0) {
+      if (legendEl) legendEl.style.display = "none";
+      return;
+    }
+    /* Heatmap from all visible points */
+    var heatPts = [];
+    for (var i = 0; i < pts.length; i++) {
+      heatPts.push([pts[i].lat, pts[i].lng, 1]);
+    }
+    heatLayerInstance = L.heatLayer(heatPts, {
+      radius: 25, blur: 15, maxZoom: 15, max: 1.0,
+      gradient: { 0.2: "#2196F3", 0.4: "#4CAF50", 0.6: "#FFC107", 0.8: "#FF9800", 1.0: "#F44336" }
+    }).addTo(mapInstance);
+    /* Color-coded markers with popups (use L.marker for cluster support) */
+    for (var j = 0; j < pts.length; j++) {
+      var p = pts[j];
+      var dt = "";
+      try {
+        var dd = new Date(p.dateTime);
+        dt = dd.toLocaleDateString("en-AU", { day: "numeric", month: "short" }) + " " + dd.toLocaleTimeString("en-AU", { hour: "2-digit", minute: "2-digit" });
+      } catch (e) { dt = p.dateTime; }
+      var popHtml = '<div style="font-family:Roboto,sans-serif;font-size:12px;min-width:160px;">' +
+        '<div style="font-weight:600;margin:0 0 4px 0;">' + esc(p.deviceName) + '</div>' +
+        '<div style="color:#556575;margin:0 0 2px 0;">' + esc(p.ruleName) + '</div>' +
+        '<div style="color:#556575;margin:0 0 6px 0;">' + esc(dt) + '</div>' +
+        '<a href="' + gtExcLink(p.deviceId, [p.ruleId]) + '" target="_top" style="color:#0078D3;text-decoration:none;font-size:11px;">View in Exceptions \u2192</a>' +
+        '</div>';
+      var dotIcon = L.divIcon({
+        html: '<div style="width:10px;height:10px;border-radius:50%;background:' + p.color + ';border:1.5px solid #fff;box-shadow:0 1px 2px rgba(0,0,0,0.3);"></div>',
+        className: '',
+        iconSize: L.point(10, 10),
+        iconAnchor: L.point(5, 5)
+      });
+      var marker = L.marker([p.lat, p.lng], { icon: dotIcon }).bindPopup(popHtml, { maxWidth: 220 });
+      marker._fhaData = { deviceId: p.deviceId, deviceName: p.deviceName, ruleName: p.ruleName, ruleId: p.ruleId, dateTime: p.dateTime, color: p.color };
+      marker.addTo(mapMarkersLayer);
+    }
+    /* Fit bounds */
+    var lats = [], lngs = [];
+    for (var k = 0; k < pts.length; k++) { lats.push(pts[k].lat); lngs.push(pts[k].lng); }
+    if (lats.length > 1) {
+      mapInstance.fitBounds(L.latLngBounds(
+        [Math.min.apply(null, lats) - 0.005, Math.min.apply(null, lngs) - 0.005],
+        [Math.max.apply(null, lats) + 0.005, Math.max.apply(null, lngs) + 0.005]
+      ), { padding: [40, 40] });
+    } else if (lats.length === 1) {
+      mapInstance.setView([lats[0], lngs[0]], 14);
+    }
+    if (legendEl) legendEl.style.display = "block";
+  }
+
+  function updateStatsCards() {
+    var pts = getFilteredPoints();
+    /* Total events (raw API count) */
+    var c0 = document.getElementById("fha-card-val-0");
+    if (c0) c0.textContent = (mapActiveRules.length > 0) ? mapRawEventCount : "--";
+    /* Unique vehicles */
+    var devs = {};
+    for (var i = 0; i < pts.length; i++) devs[pts[i].deviceId] = true;
+    var devCount = 0;
+    for (var k in devs) { if (devs.hasOwnProperty(k)) devCount++; }
+    var c1 = document.getElementById("fha-card-val-1");
+    if (c1) c1.textContent = (mapActiveRules.length > 0) ? devCount : "--";
+    /* Peak hour */
+    var hours = {};
+    for (var j = 0; j < pts.length; j++) {
+      try {
+        var hr = new Date(pts[j].dateTime).getHours();
+        hours[hr] = (hours[hr] || 0) + 1;
+      } catch (e) {}
+    }
+    var peakHr = "--", peakCount = 0;
+    for (var hk in hours) {
+      if (hours.hasOwnProperty(hk) && hours[hk] > peakCount) { peakCount = hours[hk]; peakHr = hk; }
+    }
+    var c2 = document.getElementById("fha-card-val-2");
+    if (c2) {
+      if (peakHr !== "--") {
+        var h12 = parseInt(peakHr);
+        var ampm = h12 >= 12 ? "pm" : "am";
+        if (h12 === 0) h12 = 12; else if (h12 > 12) h12 -= 12;
+        c2.innerHTML = h12 + '<span style="font-size:11px;font-weight:400;">' + ampm + '</span>';
+      } else { c2.textContent = "--"; }
+    }
+    /* Mapped locations */
+    var c3 = document.getElementById("fha-card-val-3");
+    if (c3) c3.textContent = (mapActiveRules.length > 0) ? pts.length : "--";
+  }
+
+  function updateVehiclePanel() {
+    var el = document.getElementById("fha-map-vehicles");
+    if (!el) return;
+    /* Only count visible-rule points */
+    var visPts = [];
+    for (var i = 0; i < mapEnrichedPoints.length; i++) {
+      var p = mapEnrichedPoints[i], vis = false;
+      for (var r = 0; r < mapActiveRules.length; r++) {
+        if (mapActiveRules[r].id === p.ruleId && mapActiveRules[r].visible) { vis = true; break; }
+      }
+      if (vis) visPts.push(p);
+    }
+    var devCounts = {}, devNames = {};
+    for (var j = 0; j < visPts.length; j++) {
+      var did = visPts[j].deviceId;
+      devCounts[did] = (devCounts[did] || 0) + 1;
+      devNames[did] = visPts[j].deviceName;
+    }
+    /* Sort by count desc */
+    var devArr = [];
+    for (var dk in devCounts) {
+      if (devCounts.hasOwnProperty(dk)) devArr.push({ id: dk, name: devNames[dk], count: devCounts[dk] });
+    }
+    devArr.sort(function (a, b) { return b.count - a.count; });
+    if (devArr.length === 0) {
+      el.innerHTML = '<div style="padding:12px;font-size:11px;color:' + C.textMuted + ';text-align:center;">No vehicle data</div>';
+      return;
+    }
+    var maxCount = devArr[0].count;
+    var h = '';
+    /* All vehicles option */
+    h += '<div class="fha-veh-item" data-vid="" style="display:flex;align-items:center;gap:8px;padding:6px 12px;cursor:pointer;font-size:11px;background:' + (!mapVehicleFilter ? C.blueLight : "transparent") + ';border-left:3px solid ' + (!mapVehicleFilter ? C.blue : "transparent") + ';">';
+    h += '<span style="flex:1;font-weight:' + (!mapVehicleFilter ? "600" : "400") + ';color:' + C.textPrimary + ';">All vehicles</span>';
+    h += '<span style="color:' + C.textMuted + ';">' + visPts.length + '</span></div>';
+    for (var v = 0; v < devArr.length; v++) {
+      var d = devArr[v];
+      var isActive = (mapVehicleFilter === d.id);
+      var barW = maxCount > 0 ? Math.round((d.count / maxCount) * 100) : 0;
+      /* Determine dominant rule color for this vehicle */
+      var dColor = C.dangerDark;
+      var ruleCounts = {};
+      for (var rc = 0; rc < visPts.length; rc++) {
+        if (visPts[rc].deviceId === d.id) {
+          var rId = visPts[rc].ruleId;
+          ruleCounts[rId] = (ruleCounts[rId] || 0) + 1;
+        }
+      }
+      var topRid = null, topRc = 0;
+      for (var rk in ruleCounts) {
+        if (ruleCounts.hasOwnProperty(rk) && ruleCounts[rk] > topRc) { topRc = ruleCounts[rk]; topRid = rk; }
+      }
+      for (var ar = 0; ar < mapActiveRules.length; ar++) {
+        if (mapActiveRules[ar].id === topRid) { dColor = mapActiveRules[ar].color; break; }
+      }
+      h += '<div class="fha-veh-item" data-vid="' + esc(d.id) + '" style="display:flex;align-items:center;gap:8px;padding:6px 12px;cursor:pointer;font-size:11px;background:' + (isActive ? C.blueLight : "transparent") + ';border-left:3px solid ' + (isActive ? C.blue : "transparent") + ';">';
+      h += '<span style="width:8px;height:8px;border-radius:50%;background:' + dColor + ';flex-shrink:0;"></span>';
+      h += '<div style="flex:1;min-width:0;">';
+      h += '<div style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-weight:' + (isActive ? "600" : "400") + ';color:' + C.textPrimary + ';" title="' + esc(d.name) + '">' + esc(d.name) + '</div>';
+      h += '<div style="height:3px;background:' + C.bgSecondary + ';border-radius:2px;margin:3px 0 0 0;"><div style="height:100%;width:' + barW + '%;background:' + dColor + ';border-radius:2px;opacity:0.6;"></div></div>';
+      h += '</div>';
+      h += '<span style="color:' + C.textMuted + ';font-weight:600;flex-shrink:0;">' + d.count + '</span>';
+      h += '</div>';
+    }
+    el.innerHTML = h;
+    /* Bind clicks */
+    var items = el.querySelectorAll(".fha-veh-item");
+    for (var vi = 0; vi < items.length; vi++) {
+      items[vi].onclick = function () {
+        var vid = this.getAttribute("data-vid");
+        mapVehicleFilter = vid || null;
+        rebuildMapLayers();
+        updateStatsCards();
+        updateVehiclePanel();
+      };
+    }
+  }
+
+  /* ── Lifecycle ── */
+  return {
+    initialize: function (api, state, callback) {
+      storedApi = api;
+      readGroupFilter(state);
+      api.getSession(function (session) {
+        currentDb = session.database || "";
+        currentUserEmail = session.userName || "";
+        currentUserName = (session.userName || "").split("@")[0];
+        currentFirstName = currentUserName.charAt(0).toUpperCase() + currentUserName.slice(1);
+        /* Store session credentials for n8n webhook calls */
+        sessionCredentials = {
+          database: session.database || "",
+          userName: session.userName || "",
+          sessionId: session.sessionId || "",
+          server: session.server || "my.geotab.com"
+        };
+        /* Default email recipient to current user if not set */
+        if (!emailConfig.recipient) emailConfig.recipient = currentUserEmail;
+        greetingIndex = Math.floor(Math.random() * greetings.length);
+        fetchGeotabUsers(api);
+        fetchGeotabGroups(api);
+        fetchActiveDevices(api);
+        showIdle();
+      });
+      callback();
+    },
+    focus: function (api, state) {
+      storedApi = api;
+      fetchActiveDevices(api);
+      var prevFilter = activeGroupFilter.join(",");
+      readGroupFilter(state);
+      var newFilter = activeGroupFilter.join(",");
+      if (prevFilter !== newFilter && lastData) {
+        /* Group filter changed — re-render existing results with new filter */
+        render(lastData);
+      } else if (!lastData) {
+        showIdle();
+      }
+    },
+    blur: function (api, state) {}
+  };
+};
+</script>
+</body>
+</html>
